@@ -1,0 +1,251 @@
+/**
+ * Pontuação por SELEÇÕES CLASSIFICADAS em cada fase.
+ *
+ * Fases consideradas (adaptadas para Copa 2026, com R32):
+ *   - group_stage:  avança da fase de grupos para R32         (32 times)
+ *   - r32:          vence R32 e avança para R16               (16 times)
+ *   - r16:          vence R16 e avança para QF                (8 times)
+ *   - quarters:     vence QF e avança para SF                 (4 times)
+ *   - semis:        vence SF e avança para final              (2 times)
+ *   - third_place:  ganha disputa de 3º                       (1 time)
+ *   - champion:     ganha a final                             (1 time)
+ *
+ * Pontos base configurados em `settings.pts_qual_*`.
+ *
+ * FATOR MULTIPLICADOR DE CLASSIFICAÇÃO (diferente do fator zebra de PLACAR):
+ *   fator = (total_apostadores - apostadores_que_chutaram_essa_selecao_nessa_fase) / total
+ *   pontos_finais = pontos_base × (1 + fator)
+ *
+ * - Se muita gente apostou na seleção que avançou, fator ≈ 0 → pts_finais ≈ base
+ * - Se pouca gente apostou e ela passou, fator ≈ 1 → pts_finais ≈ 2× base
+ */
+
+import type {
+  Match, Team, Bet, AnnexCOption, Settings,
+  QualificationPhase,
+} from '@/types/database';
+import {
+  computeGroupStandings, computeThirdPlaceRanking,
+  sortedKeyOfQualifyingThirds, areAllGroupsMature,
+} from './standings';
+import { findAnnexCOption, simulateBracket, type KoTiebreakHint } from './bracket';
+
+export const PHASE_ORDER: QualificationPhase[] = [
+  'group_stage', 'r32', 'r16', 'quarters', 'semis', 'third_place', 'champion',
+];
+
+export function phasePointsBase(phase: QualificationPhase, settings: Settings): number {
+  switch (phase) {
+    case 'group_stage': return settings.pts_qual_groups;
+    case 'r32':         return settings.pts_qual_r32;
+    case 'r16':         return settings.pts_qual_r16;
+    case 'quarters':    return settings.pts_qual_quarters;
+    case 'semis':       return settings.pts_qual_semis;
+    case 'third_place': return settings.pts_qual_third;
+    case 'champion':    return settings.pts_qual_champion;
+  }
+}
+
+export function qualificationZebraFactor(
+  totalBettors: number,
+  bettorsOnThisTeamInThisPhase: number,
+): number {
+  if (totalBettors <= 0) return 0;
+  return (totalBettors - bettorsOnThisTeamInThisPhase) / totalBettors;
+}
+
+export function calculateQualificationPoints(
+  basePoints: number,
+  factor: number,
+): { factorAsMult: number; finalPoints: number } {
+  const factorAsMult = 1 + factor;
+  return { factorAsMult, finalPoints: Number((basePoints * factorAsMult).toFixed(2)) };
+}
+
+/**
+ * Dado um conjunto de matches (já com home/away_score), extrai os times
+ * que CHEGARAM (foram para a fase) em cada fase de qualificação.
+ *
+ * NÃO confunda "chegar à fase" com "vencer a fase":
+ *   - 'group_stage'  → times que avançaram dos grupos (entram no R32)
+ *   - 'r32'          → vencedores de R32 (entram em R16)
+ *   - 'r16'          → vencedores de R16 (entram em QF)
+ *   - 'quarters'     → vencedores de QF (entram em SF)
+ *   - 'semis'        → finalistas (vencedores de SF)
+ *   - 'third_place'  → vencedor do jogo do 3º
+ *   - 'champion'     → vencedor da final
+ */
+export function extractAdvancingTeams(
+  matches: Match[],
+): Record<QualificationPhase, Set<number>> {
+  const result: Record<QualificationPhase, Set<number>> = {
+    group_stage: new Set(), r32: new Set(), r16: new Set(),
+    quarters: new Set(), semis: new Set(), third_place: new Set(),
+    champion: new Set(),
+  };
+
+  // Times que avançam dos grupos = home/away dos jogos de R32 (assumindo já populado)
+  for (const m of matches) {
+    if (m.phase === 'round_of_32') {
+      if (m.home_team_id) result.group_stage.add(m.home_team_id);
+      if (m.away_team_id) result.group_stage.add(m.away_team_id);
+    }
+  }
+
+  // Vencedores de cada fase
+  function winnerOf(m: Match): number | null {
+    if (m.home_score == null || m.away_score == null) return null;
+    if (m.home_score > m.away_score) return m.home_team_id;
+    if (m.away_score > m.home_score) return m.away_team_id;
+    if (m.home_pens != null && m.away_pens != null) {
+      return m.home_pens > m.away_pens ? m.home_team_id : m.away_team_id;
+    }
+    return null;
+  }
+
+  for (const m of matches) {
+    const w = winnerOf(m);
+    if (!w) continue;
+    if (m.phase === 'round_of_32')   result.r32.add(w);
+    if (m.phase === 'round_of_16')   result.r16.add(w);
+    if (m.phase === 'quarter_finals') result.quarters.add(w);
+    if (m.phase === 'semi_finals')    result.semis.add(w);
+    if (m.phase === 'third_place')    result.third_place.add(w);
+    if (m.phase === 'final')          result.champion.add(w);
+  }
+  return result;
+}
+
+/**
+ * Para um usuário e seus palpites, simula a árvore e extrai os times
+ * que ELE acredita que vão a cada fase. Retorna o mesmo formato de
+ * extractAdvancingTeams().
+ */
+export function extractUserPredictedTeams(
+  userBets: Bet[],
+  allMatches: Match[],
+  teams: Team[],
+  annexCOptions: AnnexCOption[],
+): Record<QualificationPhase, Set<number>> {
+  const userBetsByMatch = new Map(userBets.map(b => [b.match_id, b]));
+  const simMatches: Match[] = allMatches.map(m => {
+    const b = userBetsByMatch.get(m.id);
+    if (b) return { ...m, home_score: b.home_score, away_score: b.away_score };
+    return m;
+  });
+
+  if (!areAllGroupsMature(simMatches)) {
+    return {
+      group_stage: new Set(), r32: new Set(), r16: new Set(),
+      quarters: new Set(), semis: new Set(), third_place: new Set(),
+      champion: new Set(),
+    };
+  }
+
+  const standings = computeGroupStandings(teams, simMatches);
+  const thirds = computeThirdPlaceRanking(standings);
+  const key = sortedKeyOfQualifyingThirds(thirds);
+  const opt = key.length === 8 ? findAnnexCOption(key, annexCOptions) : null;
+
+  const hints = new Map<number, KoTiebreakHint>();
+  for (const b of userBets) {
+    if (b.knockout_advancer) hints.set(b.match_id, { knockout_advancer: b.knockout_advancer });
+  }
+
+  const resolved = simulateBracket(simMatches, teams, standings, thirds, opt, hints);
+  return extractAdvancingTeams(resolved);
+}
+
+/**
+ * Conta, por (phase, team_id), quantos usuários previram aquele time.
+ * Usado para calcular o fator zebra de classificação.
+ */
+export function buildPredictionCensus(
+  allUserBets: { userId: string; bets: Bet[] }[],
+  allMatches: Match[],
+  teams: Team[],
+  annexCOptions: AnnexCOption[],
+): { totalUsers: number; counts: Map<string, number> } {
+  const counts = new Map<string, number>();
+  let totalUsers = 0;
+  for (const { bets } of allUserBets) {
+    if (bets.length === 0) continue;
+    totalUsers++;
+    const predicted = extractUserPredictedTeams(bets, allMatches, teams, annexCOptions);
+    for (const phase of PHASE_ORDER) {
+      for (const teamId of predicted[phase]) {
+        const key = `${phase}:${teamId}`;
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+    }
+  }
+  return { totalUsers, counts };
+}
+
+/** Score row de saída para persistência em `user_qualification_scores`. */
+export interface QualificationScoreRow {
+  user_id: string;
+  phase: QualificationPhase;
+  team_id: number;
+  predicted: boolean;
+  is_correct: boolean;
+  points_base: number;
+  factor: number;
+  points_final: number;
+}
+
+/**
+ * Para um usuário, calcula todas as linhas de pontuação de classificação,
+ * baseado nas seleções que ELE previu e nas que REALMENTE avançaram.
+ *
+ * @param censusCounts contagem global (phase:team_id -> qtde apostadores)
+ * @param totalUsers   total de apostadores (denominador do fator)
+ */
+export function calculateUserQualificationScores(params: {
+  userId: string;
+  userBets: Bet[];
+  allMatches: Match[];
+  realAdvancingTeams: Record<QualificationPhase, Set<number>>;
+  censusCounts: Map<string, number>;
+  totalUsers: number;
+  teams: Team[];
+  annexCOptions: AnnexCOption[];
+  settings: Settings;
+}): QualificationScoreRow[] {
+  const {
+    userId, userBets, allMatches, realAdvancingTeams,
+    censusCounts, totalUsers, teams, annexCOptions, settings,
+  } = params;
+
+  const predicted = extractUserPredictedTeams(userBets, allMatches, teams, annexCOptions);
+  const rows: QualificationScoreRow[] = [];
+
+  for (const phase of PHASE_ORDER) {
+    const real = realAdvancingTeams[phase];
+    const userPred = predicted[phase];
+    const basePts = phasePointsBase(phase, settings);
+
+    // Apenas times que o usuário previu (interesse: só salvamos os preditos)
+    for (const teamId of userPred) {
+      const isCorrect = real.has(teamId);
+      const censusKey = `${phase}:${teamId}`;
+      const bettorsOnIt = censusCounts.get(censusKey) ?? 0;
+      const factor = qualificationZebraFactor(totalUsers, bettorsOnIt);
+      const { finalPoints } = calculateQualificationPoints(
+        isCorrect ? basePts : 0,
+        factor,
+      );
+      rows.push({
+        user_id: userId,
+        phase,
+        team_id: teamId,
+        predicted: true,
+        is_correct: isCorrect,
+        points_base: isCorrect ? basePts : 0,
+        factor: Number(factor.toFixed(4)),
+        points_final: finalPoints,
+      });
+    }
+  }
+  return rows;
+}
