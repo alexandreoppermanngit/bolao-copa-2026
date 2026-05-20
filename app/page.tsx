@@ -18,34 +18,53 @@ export default async function HomePage() {
         Overlay: gradient escuro garante contraste do texto branco.
       */}
       <section
-        className="hero-copa-2026 text-white rounded-xl shadow-lg overflow-hidden relative
-                   p-6 sm:p-8 md:p-10 flex flex-col justify-end
-                   min-h-[54vh] md:min-h-[58vh] max-h-[580px]"
-      >
-        <div className="relative z-10 max-w-3xl">
-          <h1 className="text-3xl sm:text-4xl md:text-6xl font-bold mb-3 drop-shadow-lg">
-            🏆 Bolão Copa do Mundo 2026
-          </h1>
-          <p className="text-base sm:text-lg md:text-xl opacity-95 drop-shadow">
-            Estados Unidos · Canadá · México · 11/06 a 19/07/2026
-          </p>
-          <p className="mt-4 max-w-2xl text-sm sm:text-base md:text-lg opacity-90 drop-shadow">
-            48 seleções · 12 grupos · 104 jogos. Faça seus palpites em todos os jogos,
-            da fase de grupos até a final, e dispute o ranking geral e o ranking zebra.
-          </p>
-          <div className="mt-6 flex flex-wrap gap-3">
-            {user
-              ? <Link href="/apostas" className="btn bg-white text-brand-600 hover:bg-brand-50">Ir para minhas apostas →</Link>
-              : <Link href="/login" className="btn bg-white text-brand-600 hover:bg-brand-50">Entrar com Google</Link>}
-            <Link href="/ranking" className="btn bg-white/10 backdrop-blur text-white border border-white/40 hover:bg-white/20">
-              Ver Ranking
-            </Link>
-          </div>
-          <p className="mt-4 text-sm sm:text-base font-medium drop-shadow">
-            Valor: <strong>R$ 50</strong> · PIX: <code className="font-mono">21982276364</code>
-          </p>
-        </div>
-      </section>
+  className="hero-copa-2026 text-white relative overflow-hidden
+             left-1/2 right-1/2 w-screen -ml-[50vw] -mr-[50vw]
+             px-6 py-10 sm:px-8 md:px-16
+             flex flex-col justify-end
+             min-h-[54vh] md:min-h-[58vh] max-h-[580px]"
+>
+  <div className="relative z-10 mx-auto w-full max-w-7xl">
+    <div className="max-w-3xl">
+      <h1 className="text-3xl sm:text-4xl md:text-6xl font-bold mb-3 drop-shadow-lg">
+        🏆 Bolão Copa do Mundo 2026
+      </h1>
+
+      <p className="text-base sm:text-lg md:text-xl opacity-95 drop-shadow">
+        Estados Unidos · Canadá · México · 11/06 a 19/07/2026
+      </p>
+
+      <p className="mt-4 max-w-2xl text-sm sm:text-base md:text-lg opacity-90 drop-shadow">
+        48 seleções · 12 grupos · 104 jogos. Faça seus palpites em todos os jogos,
+        da fase de grupos até a final, e dispute o ranking geral e o ranking zebra.
+      </p>
+
+      <div className="mt-6 flex flex-wrap gap-3">
+        {user ? (
+          <Link href="/apostas" className="btn bg-white text-brand-600 hover:bg-brand-50">
+            Ir para minhas apostas →
+          </Link>
+        ) : (
+          <Link href="/login" className="btn bg-white text-brand-600 hover:bg-brand-50">
+            Entrar com Google
+          </Link>
+        )}
+
+        <Link
+          href="/ranking"
+          className="btn bg-white/10 backdrop-blur text-white border border-white/40 hover:bg-white/20"
+        >
+          Ver Ranking
+        </Link>
+      </div>
+
+      <p className="mt-4 text-sm sm:text-base font-medium drop-shadow">
+        Valor: <strong>R$ 50</strong> · PIX:{' '}
+        <code className="font-mono">21982276364</code>
+      </p>
+    </div>
+  </div>
+</section>
 
       <section className="grid grid-cols-1 gap-3 sm:grid-cols-3  sm:gap-4">
         <Card title="Apostadores" value={totalUsers ?? 0} />
