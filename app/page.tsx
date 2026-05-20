@@ -20,6 +20,7 @@ export default async function HomePage() {
       <section
   className="hero-copa-2026 text-white relative overflow-hidden
              left-1/2 right-1/2 w-screen -ml-[50vw] -mr-[50vw]
+             -mt-6 sm:-mt-8 lg:-mt-8
              px-6 py-10 sm:px-8 md:px-16
              flex flex-col justify-end
              min-h-[54vh] md:min-h-[58vh] max-h-[580px]"
