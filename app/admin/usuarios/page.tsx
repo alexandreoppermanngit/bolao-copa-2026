@@ -9,6 +9,7 @@ interface ProfileRow {
   email: string;
   display_name: string | null;
   is_admin: boolean;
+  can_edit_results: boolean;
   created_at: string;
 }
 
@@ -19,7 +20,7 @@ export default async function AdminUsersPage() {
   const supabase = createClient();
   const { data: users } = await supabase
     .from('profiles')
-    .select('id, email, display_name, is_admin, created_at')
+    .select('id, email, display_name, is_admin, can_edit_results, created_at')
     .order('created_at', { ascending: false });
 
   return (

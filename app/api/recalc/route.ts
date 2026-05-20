@@ -7,7 +7,8 @@
  */
 
 import { NextResponse, type NextRequest } from 'next/server';
-import { createServiceRoleClient, requireAdmin } from '@/lib/supabase/server';
+import { createServiceRoleClient } from '@/lib/supabase/server';
+import { requireResultsEditor } from '@/lib/bolao/permissions';
 import { fullRecalc, recalcBracket } from '@/lib/bolao/recalc';
 import { revalidatePath } from 'next/cache';
 
@@ -29,12 +30,14 @@ export async function POST(req: NextRequest) {
 
     let actorEmail: string | null = null;
     let actorId: string | null = null;
+    let actorRole: string = 'cron';
 
     if (!cronOK) {
-      const { isAdmin, user } = await requireAdmin();
-      if (!isAdmin) return jsonError('Não autorizado: apenas admin', 403);
-      actorEmail = user?.email ?? null;
-      actorId = user?.id ?? null;
+      const ctx = await requireResultsEditor();
+      if (!ctx.allowed) return jsonError('Não autorizado: apenas admin ou editor de resultados', 403);
+      actorEmail = ctx.user?.email ?? null;
+      actorId = ctx.user?.id ?? null;
+      actorRole = ctx.role;
     }
 
     // Buscar jogos com placar para reportar quais foram processados
@@ -70,7 +73,7 @@ export async function POST(req: NextRequest) {
         actor_id: actorId,
         actor_email: actorEmail ?? 'system',
         action: 'full_recalc',
-        payload: { matchesProcessed: completed.length },
+        payload: { matchesProcessed: completed.length, actor_role: actorRole },
       });
     } catch (e) {
       console.warn('audit_log falhou:', (e as Error).message);

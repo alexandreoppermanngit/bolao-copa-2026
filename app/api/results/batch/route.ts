@@ -7,7 +7,8 @@
 
 import { NextResponse, type NextRequest } from 'next/server';
 import { z } from 'zod';
-import { createServiceRoleClient, requireAdmin } from '@/lib/supabase/server';
+import { createServiceRoleClient } from '@/lib/supabase/server';
+import { requireResultsEditor } from '@/lib/bolao/permissions';
 import {
   recalcMatchAndAllBets, recalcBracket, recalcAllQualificationScores,
 } from '@/lib/bolao/recalc';
@@ -32,8 +33,9 @@ function jsonError(msg: string, status = 500, extra?: Record<string, unknown>) {
 
 export async function POST(req: NextRequest) {
   try {
-    const { isAdmin, user } = await requireAdmin();
-    if (!isAdmin) return jsonError('Não autorizado', 403);
+    const ctx = await requireResultsEditor();
+    if (!ctx.allowed) return jsonError('Não autorizado: apenas admin ou editor de resultados', 403);
+    const user = ctx.user;
 
     const parsed = Body.safeParse(await req.json().catch(() => null));
     if (!parsed.success) return jsonError('Payload inválido', 400);
@@ -70,7 +72,7 @@ export async function POST(req: NextRequest) {
     await sb.from('audit_log').insert({
       actor_id: user?.id, actor_email: user?.email,
       action: 'batch_update_results',
-      payload: { count: parsed.data.results.length, failures: failures.length },
+      payload: { count: parsed.data.results.length, failures: failures.length, actor_role: ctx.role },
     });
 
     // 5) Invalidar caches

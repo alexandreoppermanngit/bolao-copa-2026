@@ -59,6 +59,11 @@ export interface Profile {
   display_name: string | null;
   avatar_url: string | null;
   is_admin: boolean;
+  /**
+   * Permissão intermediária (migration 004). Quando true (e is_admin = false),
+   * o usuário acessa apenas /admin/resultados + APIs de resultado/recálculo.
+   */
+  can_edit_results: boolean;
 }
 
 export interface AnnexCOption {

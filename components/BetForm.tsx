@@ -1,6 +1,7 @@
 'use client';
 
-import { useMemo, useState, useCallback } from 'react';
+import { useMemo, useState, useCallback, useRef } from 'react';
+import { useRouter } from 'next/navigation';
 import type {
   Match, Team, Bet, Settings, AnnexCOption, GroupCode,
 } from '@/types/database';
@@ -59,6 +60,19 @@ export function BetForm({ userId, matches, teams, existingBets, annexCOptions, s
 
   const [bets, setBets] = useState<Map<number, LocalBet>>(initial);
   const [saveStatus, setSaveStatus] = useState<string>('');
+  const router = useRouter();
+
+  /**
+   * Guard contra race condition: cada save recebe um seqId por match.
+   * Se uma resposta mais antiga chegar depois de uma mais nova, é descartada.
+   */
+  const saveSeqRef = useRef<Map<number, number>>(new Map());
+
+  /**
+   * Debounce timers por matchId — para que digitar rápido em vários campos
+   * não dispare múltiplos saves intermediários nem perca o último valor.
+   */
+  const debounceTimersRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
 
   const teamById = useMemo(() => new Map(teams.map(t => [t.id, t])), [teams]);
 
@@ -132,7 +146,7 @@ export function BetForm({ userId, matches, teams, existingBets, annexCOptions, s
   }
 
   // ============================================================
-  // SAVE
+  // SAVE — com race-guard por seqId e router.refresh() após sucesso
   // ============================================================
   const saveBet = useCallback(async (matchId: number, lb: LocalBet) => {
     if (isLocked) {
@@ -150,6 +164,12 @@ export function BetForm({ userId, matches, teams, existingBets, annexCOptions, s
       return;
     }
 
+    // Sequência incremental por match — usada para descartar respostas antigas
+    const prevSeq = saveSeqRef.current.get(matchId) ?? 0;
+    const mySeq = prevSeq + 1;
+    saveSeqRef.current.set(matchId, mySeq);
+
+    setSaveStatus('💾 Salvando…');
     setBets(prev => {
       const next = new Map(prev);
       const cur = next.get(matchId);
@@ -162,6 +182,7 @@ export function BetForm({ userId, matches, teams, existingBets, annexCOptions, s
       const res = await fetch('/api/bets/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
         body: JSON.stringify({
           match_id: matchId,
           home_score: hs,
@@ -175,16 +196,37 @@ export function BetForm({ userId, matches, teams, existingBets, annexCOptions, s
       errorMsg = (e as Error).message;
     }
 
+    // Se outro save mais novo já partiu para este match, descarta este resultado
+    if (saveSeqRef.current.get(matchId) !== mySeq) return;
+
     setBets(prev => {
       const next = new Map(prev);
       const cur = next.get(matchId);
       if (cur) next.set(matchId, { ...cur, saving: false, saved: !errorMsg });
       return next;
     });
-    // userId é usado pela API via cookie de sessão; o param fica para futuras integrações
+
+    if (errorMsg) {
+      setSaveStatus(`❌ Erro: ${errorMsg}`);
+    } else {
+      setSaveStatus(`✓ Salvo às ${new Date().toLocaleTimeString('pt-BR')}`);
+      // Invalida Router Cache: /apostas, /comparativo, /ranking etc voltam
+      // a buscar dados frescos no servidor na próxima navegação/foco.
+      try { router.refresh(); } catch { /* ignore */ }
+    }
     void userId;
-    setSaveStatus(errorMsg ? `Erro: ${errorMsg}` : `✓ Salvo às ${new Date().toLocaleTimeString()}`);
-  }, [userId, matches, isLocked, lock.message]);
+  }, [userId, matches, isLocked, lock.message, router]);
+
+  function scheduleSave(matchId: number, lb: LocalBet, delay: number) {
+    const timers = debounceTimersRef.current;
+    const existing = timers.get(matchId);
+    if (existing) clearTimeout(existing);
+    const t = setTimeout(() => {
+      timers.delete(matchId);
+      saveBet(matchId, lb);
+    }, delay);
+    timers.set(matchId, t);
+  }
 
   function updateScore(matchId: number, field: 'home' | 'away', value: string) {
     setBets(prev => {
@@ -196,9 +238,10 @@ export function BetForm({ userId, matches, teams, existingBets, annexCOptions, s
         updated.advancer = null;
       }
       next.set(matchId, updated);
-      // Debounce para salvar
+      // Debounce para salvar — sempre cancela timer anterior, garantindo
+      // que o ÚLTIMO valor digitado é o que vai para o banco.
       if (updated.home !== '' && updated.away !== '') {
-        setTimeout(() => saveBet(matchId, updated), 800);
+        scheduleSave(matchId, updated, 800);
       }
       return next;
     });
@@ -211,7 +254,7 @@ export function BetForm({ userId, matches, teams, existingBets, annexCOptions, s
       if (!cur) return prev;
       const updated = { ...cur, advancer };
       next.set(matchId, updated);
-      setTimeout(() => saveBet(matchId, updated), 200);
+      scheduleSave(matchId, updated, 200);
       return next;
     });
   }
@@ -251,7 +294,20 @@ export function BetForm({ userId, matches, teams, existingBets, annexCOptions, s
         </div>
       )}
       {saveStatus && (
-        <div className="fixed top-20 right-4 bg-green-100 text-green-800 px-4 py-2 rounded shadow z-50 text-sm max-w-xs">
+        <div
+          className={
+            'fixed top-20 right-4 px-4 py-2 rounded shadow z-50 text-sm max-w-xs border ' +
+            (saveStatus.startsWith('❌')
+              ? 'bg-red-50 border-red-200 text-red-800'
+              : saveStatus.startsWith('💾')
+              ? 'bg-blue-50 border-blue-200 text-blue-800'
+              : saveStatus.startsWith('⚠️') || saveStatus.startsWith('🔒')
+              ? 'bg-amber-50 border-amber-200 text-amber-900'
+              : 'bg-green-50 border-green-200 text-green-800')
+          }
+          role="status"
+          aria-live="polite"
+        >
           {saveStatus}
         </div>
       )}
@@ -370,21 +426,30 @@ function GroupCard({
           const home = teamById.get(m.home_team_id ?? -1);
           const away = teamById.get(m.away_team_id ?? -1);
           const lb = bets.get(m.id) ?? { home: '', away: '', saved: false, saving: false };
+          const dateStr = `${m.match_date.slice(8, 10)}/${m.match_date.slice(5, 7)}`;
+          const timeStr = m.kickoff_brt.slice(0, 5);
+          const dateTimeFull = `${dateStr} ${timeStr}`;
           return (
-            <div key={m.id} className="flex items-center text-sm gap-2 py-1">
-              <div className="text-xs text-gray-500 w-20 shrink-0">
-                {m.match_date.slice(8, 10)}/{m.match_date.slice(5, 7)} {m.kickoff_brt.slice(0, 5)}
+            <div key={m.id} className="flex items-center text-sm gap-1.5 sm:gap-2 py-1">
+              {/* Data/hora: mobile compacto / desktop completo */}
+              <div className="text-[10px] sm:text-xs text-gray-500 shrink-0 w-12 sm:w-20" title={dateTimeFull}>
+                <span className="block sm:hidden leading-tight">{dateStr}<br/>🕐{timeStr}</span>
+                <span className="hidden sm:inline">{dateStr} {timeStr}</span>
               </div>
-              <div className="flex-1 text-right truncate"><TeamNameWithFlag team={home} reverse maxChars={18} /></div>
-              <input type="number" min="0" max="20" className="score-input"
+              <div className="flex-1 text-right truncate min-w-0">
+                <TeamNameWithFlag team={home} reverse maxChars={18} responsive />
+              </div>
+              <input type="number" min="0" max="20" inputMode="numeric" className="score-input"
                 disabled={disabled}
                 value={lb.home} onChange={e => onScoreChange(m.id, 'home', e.target.value)} />
               <span className="text-gray-400">×</span>
-              <input type="number" min="0" max="20" className="score-input"
+              <input type="number" min="0" max="20" inputMode="numeric" className="score-input"
                 disabled={disabled}
                 value={lb.away} onChange={e => onScoreChange(m.id, 'away', e.target.value)} />
-              <div className="flex-1 truncate"><TeamNameWithFlag team={away} maxChars={18} /></div>
-              <div className="w-4">{lb.saving ? '…' : lb.saved ? '✓' : ''}</div>
+              <div className="flex-1 truncate min-w-0">
+                <TeamNameWithFlag team={away} maxChars={18} responsive />
+              </div>
+              <div className="w-4 shrink-0">{lb.saving ? '…' : lb.saved ? '✓' : ''}</div>
             </div>
           );
         })}
@@ -440,33 +505,38 @@ function KnockoutBracket({
           const away = teamForSide(m, 'away');
           const isTie = lb.home !== '' && lb.away !== '' && lb.home === lb.away;
 
+          const dateStr = `${m.match_date.slice(8, 10)}/${m.match_date.slice(5, 7)}`;
+          const timeStr = m.kickoff_brt.slice(0, 5);
+          const dateTimeFull = `#${m.id} · ${dateStr} ${timeStr}${m.venue ? ` · ${m.venue}` : ''}`;
           return (
             <div key={m.id} className="py-3">
-              <div className="flex items-center text-sm gap-2 flex-wrap">
-                <div className="text-xs text-gray-500 w-24 shrink-0">
-                  #{m.id} · {m.match_date.slice(8, 10)}/{m.match_date.slice(5, 7)} {m.kickoff_brt.slice(0, 5)}
+              <div className="flex items-center text-sm gap-1.5 sm:gap-2 flex-wrap">
+                <div className="text-[10px] sm:text-xs text-gray-500 shrink-0 w-12 sm:w-24" title={dateTimeFull}>
+                  <span className="block sm:hidden leading-tight">#{m.id}<br/>{dateStr}</span>
+                  <span className="hidden sm:inline">#{m.id} · {dateStr} {timeStr}</span>
                 </div>
                 <div className="flex-1 min-w-0 text-right">
-                  {home ? <TeamNameWithFlag team={home} reverse maxChars={20} /> :
+                  {home ? <TeamNameWithFlag team={home} reverse maxChars={20} responsive /> :
                     <span className="text-gray-400 italic text-xs">aguardando…</span>}
                 </div>
-                <input type="number" min="0" max="20" className="score-input"
+                <input type="number" min="0" max="20" inputMode="numeric" className="score-input"
                   disabled={!home || !away || disabled}
                   value={lb.home} onChange={e => onScoreChange(m.id, 'home', e.target.value)} />
                 <span className="text-gray-400">×</span>
-                <input type="number" min="0" max="20" className="score-input"
+                <input type="number" min="0" max="20" inputMode="numeric" className="score-input"
                   disabled={!home || !away || disabled}
                   value={lb.away} onChange={e => onScoreChange(m.id, 'away', e.target.value)} />
                 <div className="flex-1 min-w-0">
-                  {away ? <TeamNameWithFlag team={away} maxChars={20} /> :
+                  {away ? <TeamNameWithFlag team={away} maxChars={20} responsive /> :
                     <span className="text-gray-400 italic text-xs">aguardando…</span>}
                 </div>
-                <div className="w-16 text-xs text-gray-500">{m.venue}</div>
-                <div className="w-4">{lb.saving ? '…' : lb.saved ? '✓' : ''}</div>
+                {/* Sede só no desktop */}
+                <div className="hidden sm:block w-16 text-xs text-gray-500">{m.venue}</div>
+                <div className="w-4 shrink-0">{lb.saving ? '…' : lb.saved ? '✓' : ''}</div>
               </div>
               {/* Pênaltis: só se empate e KO */}
               {isTie && home && away && (
-                <div className="mt-2 ml-24 flex items-center gap-3 text-xs bg-amber-50 border border-amber-200 rounded p-2">
+                <div className="mt-2 ml-0 sm:ml-24 flex items-center gap-2 sm:gap-3 text-xs bg-amber-50 border border-amber-200 rounded p-2 flex-wrap">
                   <span className="font-medium text-amber-900">Empate! Quem avança nos pênaltis?</span>
                   <label className="flex items-center gap-1 cursor-pointer">
                     <input type="radio" name={`adv_${m.id}`} checked={lb.advancer === 'home'}

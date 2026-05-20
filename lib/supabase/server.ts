@@ -52,6 +52,10 @@ export function createServiceRoleClient() {
  * Retorna { user, isAdmin } — `isAdmin` é true se:
  *   - profiles.is_admin = true; OU
  *   - email do usuário está em ADMIN_EMAILS (env var)
+ *
+ * Para permissão intermediária `can_edit_results`, use o helper rico em
+ * `lib/bolao/permissions.ts` (getActorContext / requireResultsEditor),
+ * que devolve também `canEditResults` e `role` para auditoria.
  */
 export async function requireAdmin() {
   const supabase = createClient();

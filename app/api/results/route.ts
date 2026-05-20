@@ -7,7 +7,8 @@
 
 import { NextResponse, type NextRequest } from 'next/server';
 import { z } from 'zod';
-import { createServiceRoleClient, requireAdmin } from '@/lib/supabase/server';
+import { createServiceRoleClient } from '@/lib/supabase/server';
+import { requireResultsEditor } from '@/lib/bolao/permissions';
 import { recalcMatchAndAllBets, recalcBracket, recalcAllQualificationScores } from '@/lib/bolao/recalc';
 import { revalidatePath } from 'next/cache';
 
@@ -31,8 +32,8 @@ function jsonError(message: string, status = 500, extra?: Record<string, unknown
 
 export async function POST(req: NextRequest) {
   try {
-    const { isAdmin, user } = await requireAdmin();
-    if (!isAdmin) return jsonError('Não autorizado: apenas admin', 403);
+    const ctx = await requireResultsEditor();
+    if (!ctx.allowed) return jsonError('Não autorizado: apenas admin ou editor de resultados', 403);
 
     let payload: unknown;
     try {
@@ -56,11 +57,12 @@ export async function POST(req: NextRequest) {
     }).eq('id', parsed.data.match_id);
     if (updErr) return jsonError(`Erro ao salvar matches: ${updErr.message}`, 500);
 
-    // 2) Audit log (não bloqueante)
+    // 2) Audit log (não bloqueante) — registra tipo de role usado
     try {
       await sb.from('audit_log').insert({
-        actor_id: user?.id, actor_email: user?.email,
-        action: 'update_result', payload: parsed.data,
+        actor_id: ctx.user?.id, actor_email: ctx.user?.email,
+        action: 'update_result',
+        payload: { ...parsed.data, actor_role: ctx.role },
       });
     } catch (e) {
       console.warn('audit_log falhou:', (e as Error).message);

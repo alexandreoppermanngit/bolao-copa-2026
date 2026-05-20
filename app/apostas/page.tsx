@@ -3,7 +3,13 @@ import { createClient } from '@/lib/supabase/server';
 import { BetForm } from '@/components/BetForm';
 import { MyPointsSummary } from '@/components/MyPointsSummary';
 
+// Sempre renderizar no servidor com dados frescos do Supabase.
+// `revalidate = 0` + `force-dynamic` desabilitam Data Cache / Full Route Cache.
+// O Router Cache do client é tratado em next.config.js (staleTimes.dynamic = 0)
+// e por `router.refresh()` chamado no BetForm após cada save.
 export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+export const fetchCache = 'force-no-store';
 
 export default async function BetsPage() {
   const supabase = createClient();

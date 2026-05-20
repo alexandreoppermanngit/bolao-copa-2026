@@ -2,7 +2,12 @@ import { createClient, requireAdmin } from '@/lib/supabase/server';
 import type { Match, Team, Bet, AnnexCOption } from '@/types/database';
 import { MatchComparison } from '@/components/MatchComparison';
 
+// Página dinâmica: sempre buscar bets/profiles frescos do Supabase ao montar.
+// Combinado com staleTimes.dynamic = 0 no next.config.js, garante que
+// apostas recém-salvas aparecem assim que o usuário entra na página.
 export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+export const fetchCache = 'force-no-store';
 
 interface Profile { id: string; display_name: string | null; email: string }
 

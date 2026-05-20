@@ -77,10 +77,10 @@ export async function updateSession(request: NextRequest) {
 
   // ---- 2) Logado mas tentando entrar em /admin sem permissão ----
   if (user && path.startsWith('/admin')) {
-    // Buscar is_admin na tabela profiles (não bloqueia caso de erro de rede)
+    // Buscar is_admin + can_edit_results na tabela profiles
     const { data: profile } = await supabase
       .from('profiles')
-      .select('is_admin, email')
+      .select('is_admin, can_edit_results, email')
       .eq('id', user.id)
       .maybeSingle();
 
@@ -89,13 +89,26 @@ export async function updateSession(request: NextRequest) {
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean);
 
+    const profileEmail = (profile?.email ?? user.email ?? '').toLowerCase();
     const isAdmin =
       profile?.is_admin === true ||
-      adminEmails.includes((profile?.email ?? user.email ?? '').toLowerCase());
+      adminEmails.includes(profileEmail);
+    const canEditResults = profile?.can_edit_results === true;
 
-    if (!isAdmin) {
+    // Editor de resultados: SÓ pode acessar /admin/resultados (e /admin home,
+    // que filtra os atalhos conforme permissão).
+    const isResultsEditorPath =
+      path === '/admin' ||
+      path === '/admin/' ||
+      path.startsWith('/admin/resultados');
+
+    const allowed = isAdmin || (canEditResults && isResultsEditorPath);
+
+    if (!allowed) {
       const url = request.nextUrl.clone();
-      url.pathname = '/';
+      // Editor de resultados tentando acessar página admin não permitida:
+      // mandar direto para /admin/resultados (mais útil que home).
+      url.pathname = canEditResults ? '/admin/resultados' : '/';
       const redirect = NextResponse.redirect(url);
       supabaseResponse.cookies.getAll().forEach((c) => {
         redirect.cookies.set(c.name, c.value, c);

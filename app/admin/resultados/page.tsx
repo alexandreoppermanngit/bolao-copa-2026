@@ -1,13 +1,16 @@
-import { createClient, requireAdmin } from '@/lib/supabase/server';
+import { createClient } from '@/lib/supabase/server';
+import { getActorContext, roleLabel } from '@/lib/bolao/permissions';
 import { redirect } from 'next/navigation';
 import { ResultsEditor } from '@/components/ResultsEditor';
 import type { Match, Team } from '@/types/database';
 
 export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
 export default async function AdminResultsPage() {
-  const { isAdmin } = await requireAdmin();
-  if (!isAdmin) redirect('/');
+  const ctx = await getActorContext();
+  // Aceita admin completo OU editor de resultados
+  if (!ctx.isAdmin && !ctx.canEditResults) redirect('/');
 
   const supabase = createClient();
   const [{ data: matches }, { data: teams }] = await Promise.all([
@@ -22,10 +25,14 @@ export default async function AdminResultsPage() {
         <p className="text-sm mt-1 opacity-90">
           Salvar placar aciona recálculo automático: pontuação dos apostadores + cruzamentos da chave eliminatória.
         </p>
+        <p className="text-xs mt-1 opacity-75">
+          Você está logado como <strong>{roleLabel(ctx.role)}</strong>.
+        </p>
       </div>
       <ResultsEditor
         matches={(matches ?? []) as Match[]}
         teams={(teams ?? []) as Team[]}
+        canResetAll={ctx.isAdmin}
       />
     </div>
   );

@@ -32,3 +32,29 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; }
 .score-input {
   @apply w-12 text-center border border-gray-300 rounded px-1 py-1 focus:ring-2 focus:ring-brand-500 focus:outline-none;
 }
+
+/* =======================================================================
+   HERO da home — Copa 2026
+   Background-image em /public/images/hero-copa-2026.webp com overlay
+   gradiente escuro para legibilidade do texto branco.
+   Fallback: .svg colorido caso o .jpg ainda não tenha sido enviado.
+   ======================================================================= */
+.hero-copa-2026 {
+  min-height: 60vh;
+  max-height: 600px;
+  background-color: #0d3a72; /* fallback enquanto a imagem carrega */
+  background-image:
+    linear-gradient(to bottom, rgba(0, 0, 0, 0.35) 0%, rgba(0, 0, 0, 0.55) 60%, rgba(0, 0, 0, 0.78) 100%),
+    url('/images/hero-copa-2026.webp');
+  background-size: cover, cover, cover;
+  background-position: center, center, center;
+  background-repeat: no-repeat, no-repeat, no-repeat;
+}
+
+@media (max-width: 768px) {
+  .hero-copa-2026 {
+    min-height:52vh;
+    max-height: none;
+    background-position: center top, center top, center top;
+  }
+}

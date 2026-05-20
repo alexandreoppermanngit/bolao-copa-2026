@@ -3,11 +3,13 @@
 /**
  * Tabela admin de usuários com ações de:
  *   - Promover/rebaixar admin (botão switch)
+ *   - Conceder/remover "editor de resultados" (permissão intermediária)
  *   - Deletar usuário (com 2 confirmações)
  *
  * Guards no FRONT (UX) + BACKEND (segurança real):
  *   - admin principal alexandre.oppermann@gmail.com: não permite remover/deletar
  *   - não permite ações em si mesmo (deleção)
+ *   - editor de resultados NUNCA é exibido para admins ativos (redundante)
  */
 
 import { useState } from 'react';
@@ -20,6 +22,7 @@ interface ProfileRow {
   email: string;
   display_name: string | null;
   is_admin: boolean;
+  can_edit_results: boolean;
   created_at: string;
 }
 
@@ -40,6 +43,24 @@ export function UsersAdminTable({
       const res = await fetch('/api/users/promote', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_id: u.id, is_admin: newValue }),
+      });
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j?.success) setStatus({ kind: 'err', msg: `Erro: ${j?.error ?? 'falha'}` });
+      else { setStatus({ kind: 'ok', msg: `✓ ${j.message}` }); router.refresh(); }
+    } catch (e) {
+      setStatus({ kind: 'err', msg: `Erro: ${(e as Error).message}` });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function toggleResultsEditor(u: ProfileRow) {
+    const newValue = !u.can_edit_results;
+    setBusy(`editor:${u.id}`); setStatus({ kind: 'idle', msg: 'Salvando…' });
+    try {
+      const res = await fetch('/api/users/results-editor', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: u.id, can_edit_results: newValue }),
       });
       const j = await res.json().catch(() => null);
       if (!res.ok || !j?.success) setStatus({ kind: 'err', msg: `Erro: ${j?.error ?? 'falha'}` });
@@ -93,20 +114,25 @@ export function UsersAdminTable({
         <table className="spreadsheet-table text-xs">
           <thead>
             <tr>
-              <th>Email</th><th>Nome</th><th>Admin?</th><th>Cadastrado em</th><th>Ações</th>
+              <th>Email</th><th>Nome</th><th>Papel</th><th>Cadastrado em</th><th>Ações</th>
             </tr>
           </thead>
           <tbody>
             {users.map(u => {
               const isMainAdmin = u.email.toLowerCase() === MAIN_ADMIN_EMAIL;
               const isSelf = currentUserId === u.id;
+              const roleBadge = u.is_admin
+                ? <span className="px-2 py-0.5 rounded bg-red-100 text-red-800 text-[10px] font-semibold">Admin</span>
+                : u.can_edit_results
+                ? <span className="px-2 py-0.5 rounded bg-blue-100 text-blue-800 text-[10px] font-semibold">Editor de resultados</span>
+                : <span className="px-2 py-0.5 rounded bg-gray-100 text-gray-700 text-[10px]">Usuário</span>;
               return (
                 <tr key={u.id} className={isMainAdmin ? 'bg-yellow-50' : ''}>
                   <td className="font-mono text-xs">
                     {u.email}{isMainAdmin && <span className="ml-1 text-amber-700 text-xs" title="Admin principal">⭐</span>}
                   </td>
                   <td>{u.display_name ?? '—'}</td>
-                  <td className="text-center">{u.is_admin ? '✓' : ''}</td>
+                  <td>{roleBadge}</td>
                   <td className="text-xs">{new Date(u.created_at).toLocaleString('pt-BR')}</td>
                   <td>
                     <div className="flex gap-1 flex-wrap">
@@ -116,7 +142,18 @@ export function UsersAdminTable({
                         onClick={() => toggleAdmin(u)}
                         title={isMainAdmin ? 'Admin principal — protegido' : ''}
                       >
-                        {busy === `promote:${u.id}` ? '⏳' : (u.is_admin ? '↓ Rebaixar' : '↑ Tornar admin')}
+                        {busy === `promote:${u.id}` ? '⏳' : (u.is_admin ? '↓ Rebaixar admin' : '↑ Tornar admin')}
+                      </button>
+                      {/* Editor de resultados: oculto/desabilitado se já é admin */}
+                      <button
+                        className="btn-ghost text-xs"
+                        disabled={u.is_admin || busy === `editor:${u.id}`}
+                        onClick={() => toggleResultsEditor(u)}
+                        title={u.is_admin ? 'Admin já pode editar resultados' : ''}
+                      >
+                        {busy === `editor:${u.id}`
+                          ? '⏳'
+                          : (u.can_edit_results ? '↓ Remover editor' : '🏟️ Tornar editor')}
                       </button>
                       <button
                         className="btn-danger text-xs"
@@ -135,7 +172,9 @@ export function UsersAdminTable({
         </table>
       </div>
       <p className="text-xs text-gray-500">
-        ⭐ = admin principal (não pode ser rebaixado/deletado). Ações também são validadas no servidor.
+        ⭐ = admin principal (não pode ser rebaixado/deletado). Editor de resultados acessa SOMENTE
+        <code className="mx-1">/admin/resultados</code>e APIs de resultado/recálculo — não pode resetar
+        placares, gerenciar usuários, alterar configurações ou apostas. Todas as ações são validadas no servidor.
       </p>
     </>
   );

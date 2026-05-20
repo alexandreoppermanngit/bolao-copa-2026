@@ -1,12 +1,14 @@
 import Link from 'next/link';
-import { createClient, requireAdmin } from '@/lib/supabase/server';
+import { createClient } from '@/lib/supabase/server';
+import { getActorContext, roleLabel } from '@/lib/bolao/permissions';
 import { redirect } from 'next/navigation';
 
 export const dynamic = 'force-dynamic';
 
 export default async function AdminHomePage() {
-  const { isAdmin } = await requireAdmin();
-  if (!isAdmin) redirect('/');
+  const ctx = await getActorContext();
+  // Middleware já bloqueia, mas duplicamos no servidor:
+  if (!ctx.isAdmin && !ctx.canEditResults) redirect('/');
 
   const supabase = createClient();
   const [{ count: usersCount }, { count: betsCount }, { count: matchesWithResult }, { data: settings }] = await Promise.all([
@@ -20,7 +22,9 @@ export default async function AdminHomePage() {
     <div className="space-y-6">
       <div className="bg-accent-red text-white rounded-xl p-4">
         <h1 className="text-2xl font-bold">⚙️ Painel do Administrador</h1>
-        <p className="text-sm mt-1 opacity-90">Acesso restrito. Mudanças refletem na produção.</p>
+        <p className="text-sm mt-1 opacity-90">
+          Acesso restrito. Você está logado como <strong>{roleLabel(ctx.role)}</strong>.
+        </p>
       </div>
 
       <div className="grid sm:grid-cols-4 gap-3">
@@ -31,13 +35,28 @@ export default async function AdminHomePage() {
       </div>
 
       <div className="grid sm:grid-cols-2 gap-4">
+        {/* Sempre disponível para quem pode estar aqui */}
         <AdminLink href="/admin/resultados" title="🏟️ Resultados dos Jogos" desc="Cadastrar / corrigir placares. Recálculo automático ao salvar." />
-        <AdminLink href="/admin/usuarios" title="👥 Usuários" desc="Lista de todos os usuários cadastrados (admin pode promover via SQL)." />
-        <AdminLink href="/admin/apostas" title="📋 Todas as Apostas" desc="Consulta apostas por usuário ou por jogo. Exporta CSV." />
-        <AdminLink href="/admin/configuracao" title="⚙️ Configurações" desc="Prazos de apostas, lock global, pesos de pontuação, recálculo manual." />
-        <AdminLink href="/admin/bracket-overrides" title="🛠️ Overrides do Bracket" desc="Força manualmente seleções classificadas (3ºs, critérios FIFA)." />
-        <AdminLink href="/admin/pontuacao" title="📊 Auditoria de Pontos" desc="Vista detalhada: jogos + classificação, por usuário." />
+
+        {/* Restritos a admin completo */}
+        {ctx.isAdmin && (
+          <>
+            <AdminLink href="/admin/usuarios" title="👥 Usuários" desc="Promover/rebaixar admin, conceder editor de resultados, deletar." />
+            <AdminLink href="/admin/apostas" title="📋 Todas as Apostas" desc="Consulta apostas por usuário ou por jogo. Exporta CSV." />
+            <AdminLink href="/admin/configuracao" title="⚙️ Configurações" desc="Prazos, lock global, pesos de pontuação, recálculo manual, reset." />
+            <AdminLink href="/admin/bracket-overrides" title="🛠️ Overrides do Bracket" desc="Força manualmente seleções classificadas (3ºs, critérios FIFA)." />
+            <AdminLink href="/admin/pontuacao" title="📊 Auditoria de Pontos" desc="Vista detalhada: jogos + classificação, por usuário." />
+          </>
+        )}
       </div>
+
+      {!ctx.isAdmin && ctx.canEditResults && (
+        <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 text-sm text-blue-900">
+          <strong>Permissão atual:</strong> editor de resultados. Você pode cadastrar/corrigir placares
+          e disparar recálculo. Demais áreas administrativas (usuários, configurações, pontuação,
+          apostas, overrides, reset) ficam restritas a admins completos.
+        </div>
+      )}
     </div>
   );
 }

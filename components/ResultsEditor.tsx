@@ -5,7 +5,16 @@ import { useRouter } from 'next/navigation';
 import type { Match, Team } from '@/types/database';
 import { TeamNameWithFlag } from './TeamNameWithFlag';
 
-interface Props { matches: Match[]; teams: Team[] }
+interface Props {
+  matches: Match[];
+  teams: Team[];
+  /**
+   * Se true, exibe o botão "Resetar todos os placares" (admin completo).
+   * Se false/omit, oculta o botão — editor de resultados não pode resetar.
+   * (Backend também valida via requireAdmin em /api/results/reset.)
+   */
+  canResetAll?: boolean;
+}
 
 type Editing = { h: string; a: string; hp: string; ap: string };
 
@@ -25,7 +34,7 @@ async function safeJsonFetch<T = unknown>(
   return { ok: true, status: res.status, data: data as T | null, error: null };
 }
 
-export function ResultsEditor({ matches, teams }: Props) {
+export function ResultsEditor({ matches, teams, canResetAll = false }: Props) {
   const router = useRouter();
   const teamById = useMemo(() => new Map(teams.map(t => [t.id, t])), [teams]);
   const initial: Map<number, Editing> = useMemo(() => {
@@ -180,9 +189,11 @@ export function ResultsEditor({ matches, teams }: Props) {
         <button onClick={recalcAll} disabled={bulkSaving !== 'idle'} className="btn-ghost">
           {bulkSaving === 'recalc' ? '⏳ Recalculando…' : '🔄 Recalcular tudo'}
         </button>
-        <button onClick={resetAll} disabled={bulkSaving !== 'idle'} className="btn-danger">
-          {bulkSaving === 'reset' ? '⏳ Resetando…' : '🗑️ Resetar todos os placares'}
-        </button>
+        {canResetAll && (
+          <button onClick={resetAll} disabled={bulkSaving !== 'idle'} className="btn-danger">
+            {bulkSaving === 'reset' ? '⏳ Resetando…' : '🗑️ Resetar todos os placares'}
+          </button>
+        )}
         {status.msg && (
           <div className={`text-sm border rounded px-3 py-2 ${statusCls}`}>{status.msg}</div>
         )}
