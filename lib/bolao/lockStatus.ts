@@ -26,6 +26,18 @@ export interface LockStatus {
   message: string;
 }
 
+/**
+ * Boolean direto, atalho de `getGlobalLockStatus(...).locked`.
+ * Use quando só precisa saber "está bloqueado?" (ex.: gating de visibilidade
+ * de apostas dos outros usuários em /comparativo e /estatisticas).
+ */
+export function isBetsLocked(
+  settings: Pick<Settings, 'bets_locked' | 'global_bets_deadline'> | null,
+  now: Date = new Date(),
+): boolean {
+  return getGlobalLockStatus(settings, now).locked;
+}
+
 export function getGlobalLockStatus(
   settings: Pick<Settings, 'bets_locked' | 'global_bets_deadline'> | null,
   now: Date = new Date(),
