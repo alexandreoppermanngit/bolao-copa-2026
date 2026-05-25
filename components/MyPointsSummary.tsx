@@ -11,6 +11,7 @@ const PHASE_LABEL: Record<QualificationPhase, string> = {
   quarters: 'Vence Quartas',
   semis: 'Finalistas',
   third_place: '3º lugar',
+  runner_up: 'Vice-campeão',
   champion: 'Campeão',
 };
 

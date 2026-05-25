@@ -37,6 +37,7 @@ const Body = z.object({
   pts_qual_quarters: z.number().int().min(0).optional(),
   pts_qual_semis: z.number().int().min(0).optional(),
   pts_qual_third: z.number().int().min(0).optional(),
+  pts_qual_runner_up: z.number().int().min(0).optional(),  // migration 006
   pts_qual_champion: z.number().int().min(0).optional(),
 });
 

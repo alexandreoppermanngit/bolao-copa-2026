@@ -10,7 +10,7 @@ import type {
   Match, Team, Bet, AnnexCOption, QualificationPhase, Settings,
 } from '@/types/database';
 import {
-  buildPredictionCensus, extractAdvancingTeams, extractRunnerUp,
+  buildPredictionCensus, extractAdvancingTeams,
   phasePointsBase, qualificationZebraFactor,
 } from '@/lib/bolao/qualification';
 import { DEFAULT_SETTINGS } from '@/lib/bolao/scoring';
@@ -30,6 +30,7 @@ export const fetchCache = 'force-no-store';
 //   - quarters     = vencedores das quartas, que vão para as semis (4 times)
 //   - semis        = finalistas, vencedores das semis (2 times)
 //   - third_place  = vencedor do jogo de 3º (1 seleção)
+//   - runner_up    = PERDEDOR da final / vice (1 seleção) — migration 006
 //   - champion     = vencedor da final (1 seleção)
 const PHASE_LABELS: Record<QualificationPhase, string> = {
   group_stage: 'Classificados da fase de grupos para os 16-avos (32 times)',
@@ -38,18 +39,17 @@ const PHASE_LABELS: Record<QualificationPhase, string> = {
   quarters:    'Classificados para as semifinais (4 times)',
   semis:       'Finalistas (2 times)',
   third_place: 'Terceiro lugar (1 seleção)',
+  runner_up:   'Vice-campeão (1 seleção)',
   champion:    'Campeão (1 seleção)',
 };
 
-// Ordem de EXIBIÇÃO em /estatisticas. Difere de PHASE_ORDER (que rege o scoring
-// e a persistência em user_qualification_scores e fica INALTERADO). Adiciona
-// um pseudo-phase 'runner_up' que só existe nesta página.
-type DisplayPhase = QualificationPhase | 'runner_up';
-const DISPLAY_ORDER: DisplayPhase[] = [
+// Ordem de EXIBIÇÃO em /estatisticas. Difere de PHASE_ORDER do qualification.ts
+// (que rege a iteração no recalc, fica como [..., third_place, runner_up, champion]).
+// Aqui priorizamos a narrativa: Campeão antes do Vice, com Terceiro encerrando.
+const DISPLAY_ORDER: QualificationPhase[] = [
   'group_stage', 'r32', 'r16', 'quarters', 'semis',
   'champion', 'runner_up', 'third_place',
 ];
-const RUNNER_UP_LABEL = 'Vice (1 seleção)';
 
 export default async function EstatisticasPage() {
   const supabase = createClient();
@@ -111,12 +111,11 @@ export default async function EstatisticasPage() {
   const allUserBets = userIdsToCensus.map(u => ({ userId: u.id, bets: betsByUser.get(u.id) ?? [] }));
 
   const census = buildPredictionCensus(allUserBets, matches, teams, annexC);
+  // `extractAdvancingTeams` agora também popula `real.runner_up` (perdedor
+  // da final real, se já houver resultado) — migration 006.
   const real = extractAdvancingTeams(matches);
-  // Vice real (perdedor da final) — só conhecido quando a final tem resultado;
-  // jogos reais têm pens, então não precisa de hints aqui.
-  const realRunnerUpId = extractRunnerUp(matches);
 
-  // Para cada fase real (que vai pontuar), listar todos os teamIds que tiveram ≥1 voto.
+  // Para cada fase, listar todos os teamIds que tiveram ≥1 voto.
   type Row = { team: Team; bettors: number; pct: number; reallyAdvanced: boolean; factor: number; possiblePts: number };
   function rowsForPhase(phase: QualificationPhase): Row[] {
     const teamsWithVotes: Row[] = [];
@@ -131,19 +130,6 @@ export default async function EstatisticasPage() {
       teamsWithVotes.push({ team: t, bettors, pct, reallyAdvanced, factor, possiblePts });
     }
     return teamsWithVotes.sort((a, b) => b.bettors - a.bettors);
-  }
-
-  // Linhas do card "Vice" (perdedor da final): pseudo-phase, NÃO pontua.
-  type RunnerRow = { team: Team; bettors: number; pct: number; reallyRunnerUp: boolean };
-  function runnerUpRows(): RunnerRow[] {
-    const rows: RunnerRow[] = [];
-    for (const t of teams) {
-      const bettors = census.runnerUpCounts.get(t.id) ?? 0;
-      if (bettors === 0) continue;
-      const pct = census.totalUsers > 0 ? bettors / census.totalUsers : 0;
-      rows.push({ team: t, bettors, pct, reallyRunnerUp: realRunnerUpId === t.id });
-    }
-    return rows.sort((a, b) => b.bettors - a.bettors);
   }
 
   return (
@@ -170,43 +156,6 @@ export default async function EstatisticasPage() {
       </div>
 
       {DISPLAY_ORDER.map(phase => {
-        // Card especial: VICE (perdedor da final) — não pontua, layout enxuto.
-        if (phase === 'runner_up') {
-          const rows = runnerUpRows();
-          return (
-            <div key={phase} className="bg-white rounded-xl shadow-sm p-4">
-              <h2 className="font-bold text-brand-500 mb-2">
-                {RUNNER_UP_LABEL} — informativo (não pontua)
-              </h2>
-              {rows.length === 0 && (
-                <p className="text-sm text-gray-500">Sem palpites para esta fase.</p>
-              )}
-              {rows.length > 0 && (
-                <div className="overflow-x-auto">
-                  <table className="spreadsheet-table text-xs w-full">
-                    <thead>
-                      <tr>
-                        <th>Seleção</th><th>Apostadores</th><th>%</th><th>Foi vice?</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {rows.map(r => (
-                        <tr key={r.team.id} className={r.reallyRunnerUp ? 'bg-green-50' : ''}>
-                          <td><TeamNameWithFlag team={r.team} size="sm" /></td>
-                          <td className="text-center">{r.bettors}</td>
-                          <td className="text-center">{(r.pct * 100).toFixed(0)}%</td>
-                          <td className="text-center">{r.reallyRunnerUp ? '✅' : '—'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          );
-        }
-
-        // Cards regulares — phase é QualificationPhase
         const rows = rowsForPhase(phase);
         return (
           <div key={phase} className="bg-white rounded-xl shadow-sm p-4">

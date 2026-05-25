@@ -16,6 +16,8 @@ function toLocalInput(iso: string | null): string {
   return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+// Ordem reflete a regra oficial (migration 006).
+// `pts_qual_runner_up` foi adicionado depois — fica entre 3º e Campeão.
 const QUAL_DEFAULTS: Record<string, number> = {
   pts_qual_groups: 10,
   pts_qual_r32: 12,
@@ -23,6 +25,7 @@ const QUAL_DEFAULTS: Record<string, number> = {
   pts_qual_quarters: 25,
   pts_qual_semis: 30,
   pts_qual_third: 30,
+  pts_qual_runner_up: 30,
   pts_qual_champion: 40,
 };
 
@@ -33,6 +36,7 @@ const QUAL_LABELS: Record<string, string> = {
   pts_qual_quarters: 'Vencedores das quartas',
   pts_qual_semis: 'Finalistas (vencedores das semis)',
   pts_qual_third: 'Terceiro lugar',
+  pts_qual_runner_up: 'Vice-campeão (perdedor da final)',
   pts_qual_champion: 'Campeão',
 };
 

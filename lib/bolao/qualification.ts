@@ -8,6 +8,7 @@
  *   - quarters:     vence QF e avança para SF                 (4 times)
  *   - semis:        vence SF e avança para final              (2 times)
  *   - third_place:  ganha disputa de 3º                       (1 time)
+ *   - runner_up:    PERDE a final (vice-campeão)              (1 time) — migration 006
  *   - champion:     ganha a final                             (1 time)
  *
  * Pontos base configurados em `settings.pts_qual_*`.
@@ -35,7 +36,8 @@ import {
 } from './bracket';
 
 export const PHASE_ORDER: QualificationPhase[] = [
-  'group_stage', 'r32', 'r16', 'quarters', 'semis', 'third_place', 'champion',
+  'group_stage', 'r32', 'r16', 'quarters', 'semis',
+  'third_place', 'runner_up', 'champion',
 ];
 
 export function phasePointsBase(phase: QualificationPhase, settings: Settings): number {
@@ -46,6 +48,7 @@ export function phasePointsBase(phase: QualificationPhase, settings: Settings): 
     case 'quarters':    return settings.pts_qual_quarters;
     case 'semis':       return settings.pts_qual_semis;
     case 'third_place': return settings.pts_qual_third;
+    case 'runner_up':   return settings.pts_qual_runner_up;
     case 'champion':    return settings.pts_qual_champion;
   }
 }
@@ -92,7 +95,7 @@ export function extractAdvancingTeams(
   const result: Record<QualificationPhase, Set<number>> = {
     group_stage: new Set(), r32: new Set(), r16: new Set(),
     quarters: new Set(), semis: new Set(), third_place: new Set(),
-    champion: new Set(),
+    runner_up: new Set(), champion: new Set(),
   };
 
   // Times que avançam dos grupos = home/away dos jogos de R32 (assumindo já populado).
@@ -107,15 +110,22 @@ export function extractAdvancingTeams(
 
   // Vencedores de cada fase — agora usa determineMatchWinnerId do bracket.ts,
   // que respeita knockout_advancer quando os scores empatam e não há pens.
+  // ALÉM disso, para a fase 'final', registramos o PERDEDOR em `runner_up`
+  // (vice-campeão) — migration 006 adicionou essa fase ao enum + scoring.
   for (const m of matches) {
     const w = determineMatchWinnerId(m, hintsByMatchId?.get(m.id));
+    if (m.phase === 'final') {
+      if (w) result.champion.add(w);
+      const l = determineMatchLoserId(m, hintsByMatchId?.get(m.id));
+      if (l) result.runner_up.add(l);
+      continue;
+    }
     if (!w) continue;
     if (m.phase === 'round_of_32')   result.r32.add(w);
     if (m.phase === 'round_of_16')   result.r16.add(w);
     if (m.phase === 'quarter_finals') result.quarters.add(w);
     if (m.phase === 'semi_finals')    result.semis.add(w);
     if (m.phase === 'third_place')    result.third_place.add(w);
-    if (m.phase === 'final')          result.champion.add(w);
   }
   return result;
 }
@@ -134,12 +144,15 @@ export function extractRunnerUp(
 }
 
 /**
- * Resultado expandido da simulação por usuário: classificados por fase + vice.
+ * Resultado expandido da simulação por usuário: classificados por fase.
+ *
+ * NOTA: até a v55, este resultado tinha um campo extra `runnerUp` separado
+ * porque o vice não era uma fase do enum. A partir da migration 006, o vice
+ * vira fase oficial 'runner_up' e fica dentro de `byPhase.runner_up` (Set
+ * com 0 ou 1 elemento por usuário). Mantemos o tipo enxuto.
  */
 export interface UserPrediction {
   byPhase: Record<QualificationPhase, Set<number>>;
-  /** Perdedor da final (vice) — só faz sentido na visualização, não pontua. */
-  runnerUp: number | null;
 }
 
 /** Estrutura vazia (usada quando os grupos ainda não estão maduros). */
@@ -148,17 +161,15 @@ function emptyPrediction(): UserPrediction {
     byPhase: {
       group_stage: new Set(), r32: new Set(), r16: new Set(),
       quarters: new Set(), semis: new Set(), third_place: new Set(),
-      champion: new Set(),
+      runner_up: new Set(), champion: new Set(),
     },
-    runnerUp: null,
   };
 }
 
 /**
  * Para um usuário e seus palpites, simula a árvore e extrai os times
- * que ELE acredita que vão a cada fase + o vice. Versão "full" usada por
- * `buildPredictionCensus`. A versão legada `extractUserPredictedTeams` é
- * mantida abaixo como wrapper para compatibilidade com chamadas externas.
+ * que ELE acredita que vão a cada fase. Usada por `buildPredictionCensus`.
+ * `extractUserPredictedTeams` (abaixo) é o wrapper legado.
  */
 export function extractUserPrediction(
   userBets: Bet[],
@@ -189,9 +200,10 @@ export function extractUserPrediction(
   // IMPORTANTE: passar hints — o palpite do usuário em KO pode ser empate +
   // knockout_advancer (sem pens). Sem isso, extractAdvancingTeams perde o
   // vencedor desses jogos e a fase fica com 1 time a menos.
+  // `runner_up` é populado automaticamente pelo extractAdvancingTeams
+  // (perdedor da final).
   const byPhase = extractAdvancingTeams(resolved, hints);
-  const runnerUp = extractRunnerUp(resolved, hints);
-  return { byPhase, runnerUp };
+  return { byPhase };
 }
 
 /**
@@ -210,9 +222,9 @@ export function extractUserPredictedTeams(
  * Conta, por (phase, team_id), quantos usuários previram aquele time.
  * Usado para calcular o fator zebra de classificação.
  *
- * Também retorna `runnerUpCounts` (team_id → nº de usuários que previram aquele
- * time como VICE / perdedor da final). Esse dado é puramente para exibição em
- * /estatisticas e NÃO entra no scoring (não há fase 'runner_up' em PHASE_ORDER).
+ * A fase 'runner_up' (migration 006) já entra em `counts` via PHASE_ORDER;
+ * `runnerUpCounts` permanece como alias (Map<team_id, count>) para callers
+ * que ainda querem ler o vice sem montar a chave `runner_up:<teamId>`.
  */
 export function buildPredictionCensus(
   allUserBets: { userId: string; bets: Bet[] }[],
@@ -222,6 +234,7 @@ export function buildPredictionCensus(
 ): {
   totalUsers: number;
   counts: Map<string, number>;
+  /** alias do counts filtrado por `runner_up:` — preservado por compat. */
   runnerUpCounts: Map<number, number>;
 } {
   const counts = new Map<string, number>();
@@ -235,13 +248,10 @@ export function buildPredictionCensus(
       for (const teamId of prediction.byPhase[phase]) {
         const key = `${phase}:${teamId}`;
         counts.set(key, (counts.get(key) ?? 0) + 1);
+        if (phase === 'runner_up') {
+          runnerUpCounts.set(teamId, (runnerUpCounts.get(teamId) ?? 0) + 1);
+        }
       }
-    }
-    if (prediction.runnerUp != null) {
-      runnerUpCounts.set(
-        prediction.runnerUp,
-        (runnerUpCounts.get(prediction.runnerUp) ?? 0) + 1,
-      );
     }
   }
   return { totalUsers, counts, runnerUpCounts };

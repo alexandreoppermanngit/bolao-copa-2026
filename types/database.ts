@@ -99,18 +99,20 @@ export interface Settings {
   zebra_mult_easy: number;
   zebra_mult_mid: number;
   zebra_mult_hard: number;
-  // Pontuação de classificados por fase (migration 003)
+  // Pontuação de classificados por fase (migration 003 + 006)
   pts_qual_groups: number;
   pts_qual_r32: number;
   pts_qual_r16: number;
   pts_qual_quarters: number;
   pts_qual_semis: number;
   pts_qual_third: number;
+  pts_qual_runner_up: number;  // migration 006 — vice-campeão (perdedor da final)
   pts_qual_champion: number;
 }
 
 export type QualificationPhase =
-  | 'group_stage' | 'r32' | 'r16' | 'quarters' | 'semis' | 'third_place' | 'champion';
+  | 'group_stage' | 'r32' | 'r16' | 'quarters' | 'semis'
+  | 'third_place' | 'runner_up' | 'champion';
 
 export interface BracketOverride {
   id: number;

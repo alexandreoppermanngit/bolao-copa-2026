@@ -41,6 +41,7 @@ export const DEFAULT_SETTINGS: Settings = {
   pts_qual_quarters: 25,
   pts_qual_semis: 30,
   pts_qual_third: 30,
+  pts_qual_runner_up: 30,  // migration 006 — vice-campeão (perdedor da final)
   pts_qual_champion: 40,
 };
 
