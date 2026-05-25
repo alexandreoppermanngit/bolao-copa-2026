@@ -132,6 +132,26 @@ export function BetForm({ userId, matches, teams, existingBets, annexCOptions, s
     return simulateBracket(withBets, teams, standings, thirds, annexCOption, koHints);
   }, [matches, bets, teams, standings, thirds, annexCOption, koHints]);
 
+  /**
+   * FONTE ÚNICA do resumo (campeão / vice / 3º) — derivada do estado local
+   * `bets` via `resolvedMatches`. Usada simultaneamente pelos `<BetSummary>`
+   * do TOPO e do FINAL desta página. Atualiza a cada digitação, sem depender
+   * de `router.refresh()` nem de recálculo no admin (`user_qualification_scores`
+   * só é populada por `recalcAllQualificationScores`, então não serve aqui).
+   */
+  const summaryTeams = useMemo(() => {
+    const finalMatch = resolvedMatches.find(m => m.phase === 'final');
+    const thirdMatch = resolvedMatches.find(m => m.phase === 'third_place');
+    const winId = finalMatch ? determineMatchWinnerId(finalMatch, koHints.get(finalMatch.id)) : null;
+    const loseId = finalMatch ? determineMatchLoserId(finalMatch, koHints.get(finalMatch.id)) : null;
+    const thirdId = thirdMatch ? determineMatchWinnerId(thirdMatch, koHints.get(thirdMatch.id)) : null;
+    return {
+      champion: winId ? teamById.get(winId) ?? null : null,
+      vice:     loseId ? teamById.get(loseId) ?? null : null,
+      third:    thirdId ? teamById.get(thirdId) ?? null : null,
+    };
+  }, [resolvedMatches, koHints, teamById]);
+
   function teamForMatchSide(m: Match, side: 'home' | 'away'): Team | null {
     // Para grupos, usa o team_id original (já populado no DB)
     // Para KO, usa resolvedMatches (cascateado)
@@ -312,6 +332,16 @@ export function BetForm({ userId, matches, teams, existingBets, annexCOptions, s
         </div>
       )}
 
+      {/* ====== RESUMO DO TOPO ======
+          Mesma fonte de verdade do resumo do final: `summaryTeams` (derivado
+          de `resolvedMatches`, recalculado a cada mudança no estado local).
+          Não depende de user_qualification_scores nem do recalc do admin. */}
+      <BetSummary
+        champion={summaryTeams.champion}
+        vice={summaryTeams.vice}
+        third={summaryTeams.third}
+      />
+
       {/* ====== FASE DE GRUPOS ====== */}
       <section>
         <h2 className="text-xl font-bold mb-3">📋 Fase de Grupos</h2>
@@ -380,21 +410,14 @@ export function BetForm({ userId, matches, teams, existingBets, annexCOptions, s
           groupsMature={groupsMature} disabled={isLocked} />
       )}
 
-      {/* ====== RESUMO FINAL ====== */}
-      {(() => {
-        const finalMatch = resolvedMatches.find(m => m.phase === 'final');
-        const thirdMatch = resolvedMatches.find(m => m.phase === 'third_place');
-        const winId = finalMatch ? determineMatchWinnerId(finalMatch, koHints.get(finalMatch.id)) : null;
-        const loseId = finalMatch ? determineMatchLoserId(finalMatch, koHints.get(finalMatch.id)) : null;
-        const thirdId = thirdMatch ? determineMatchWinnerId(thirdMatch, koHints.get(thirdMatch.id)) : null;
-        return (
-          <BetSummary
-            champion={winId ? teamById.get(winId) ?? null : null}
-            vice={loseId ? teamById.get(loseId) ?? null : null}
-            third={thirdId ? teamById.get(thirdId) ?? null : null}
-          />
-        );
-      })()}
+      {/* ====== RESUMO FINAL ======
+          Mesmo `summaryTeams` do resumo do topo — garante que TOPO e FINAL
+          exibam exatamente os mesmos valores. */}
+      <BetSummary
+        champion={summaryTeams.champion}
+        vice={summaryTeams.vice}
+        third={summaryTeams.third}
+      />
     </div>
   );
 }

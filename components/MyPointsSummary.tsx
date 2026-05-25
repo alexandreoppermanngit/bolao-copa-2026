@@ -14,6 +14,18 @@ const PHASE_LABEL: Record<QualificationPhase, string> = {
   champion: 'Campeão',
 };
 
+/**
+ * Resumo de PONTUAÇÃO do usuário no topo de /apostas.
+ *
+ * IMPORTANTE: este bloco mostra APENAS dados que dependem do recálculo do
+ * admin (`user_rankings_full`, `user_qualification_scores`, `bets.points`).
+ *
+ * Os cards de Campeão / Vice / Terceiro foram MOVIDOS para o `BetForm`
+ * (componente cliente), pois aqueles valores precisam refletir o estado
+ * LOCAL do palpite em tempo real — derivar de `user_qualification_scores`
+ * (que só atualiza após `recalcAllQualificationScores`) deixava o topo
+ * preso a valores antigos enquanto o final da página atualizava.
+ */
 export async function MyPointsSummary({ userId }: Props) {
   const supabase = createClient();
   const [rankRes, qualsRes, betsRes, teamsRes] = await Promise.all([
@@ -32,17 +44,6 @@ export async function MyPointsSummary({ userId }: Props) {
   const teams = (teamsRes.data ?? []) as Team[];
   const teamById = new Map(teams.map(t => [t.id, t]));
 
-  // Identificar campeão/vice/3º previstos pelo usuário (das qualification_scores)
-  const championRow = quals.find(q => q.phase === 'champion');
-  const thirdRow = quals.find(q => q.phase === 'third_place');
-  // Vice = previsão de finalista que NÃO é campeão
-  const semisFinalists = quals.filter(q => q.phase === 'semis');
-  let viceTeamId: number | null = null;
-  if (championRow) {
-    const other = semisFinalists.find(s => s.team_id !== championRow.team_id);
-    viceTeamId = other?.team_id ?? null;
-  }
-
   // Pontos por jogo: total e quantos com ≥1 pt
   const gamesWithPoints = bets.filter(b => b.points_with_zebra > 0).length;
   const gameAttempts = bets.length;
@@ -59,19 +60,12 @@ export async function MyPointsSummary({ userId }: Props) {
               sub={rank?.position ? `#${rank.position} no ranking` : '—'} highlight />
       </div>
 
-      <div className="grid sm:grid-cols-3 gap-3 mt-4">
-        <Pick label="🥇 Campeão" team={championRow ? teamById.get(championRow.team_id) : null}
-              correct={championRow?.is_correct ?? false}
-              pts={championRow?.points_final ?? 0} />
-        <Pick label="🥈 Vice" team={viceTeamId ? teamById.get(viceTeamId) ?? null : null}
-              correct={false} pts={null} />
-        <Pick label="🥉 3º Lugar" team={thirdRow ? teamById.get(thirdRow.team_id) : null}
-              correct={thirdRow?.is_correct ?? false}
-              pts={thirdRow?.points_final ?? 0} />
-      </div>
-
       <details className="mt-4 bg-white/10 rounded p-3">
         <summary className="cursor-pointer text-sm font-medium">📋 Detalhar pontuação por fase</summary>
+        <p className="text-[11px] opacity-80 mt-1">
+          Valores baseados no último recálculo do admin — para ver o palpite atual
+          do seu campeão/vice/3º, veja o resumo logo abaixo (atualiza em tempo real).
+        </p>
         <div className="mt-2 overflow-x-auto">
           <table className="w-full text-xs">
             <thead className="text-white/80">
@@ -108,24 +102,6 @@ function Stat({ label, value, sub, highlight }: { label: string; value: string; 
       <div className="text-xs uppercase tracking-wide opacity-80">{label}</div>
       <div className="text-2xl font-bold">{value}</div>
       {sub && <div className="text-xs opacity-80 mt-1">{sub}</div>}
-    </div>
-  );
-}
-
-function Pick({ label, team, correct, pts }: {
-  label: string; team: Team | null | undefined; correct: boolean; pts: number | null;
-}) {
-  return (
-    <div className="bg-white/10 rounded-lg p-3">
-      <div className="text-xs uppercase tracking-wide opacity-80">{label}</div>
-      <div className="text-sm font-bold mt-1">
-        {team ? <TeamNameWithFlag team={team} size="sm" /> : <span className="opacity-60 italic">A definir</span>}
-      </div>
-      {pts !== null && pts > 0 && (
-        <div className={`text-xs mt-1 ${correct ? 'text-green-200' : 'opacity-60'}`}>
-          {correct ? `✓ +${Number(pts).toFixed(1)} pts` : '—'}
-        </div>
-      )}
     </div>
   );
 }
