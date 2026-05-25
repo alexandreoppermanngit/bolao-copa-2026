@@ -28,7 +28,11 @@ import {
   computeGroupStandings, computeThirdPlaceRanking,
   sortedKeyOfQualifyingThirds, areAllGroupsMature,
 } from './standings';
-import { findAnnexCOption, simulateBracket, type KoTiebreakHint } from './bracket';
+import {
+  findAnnexCOption, simulateBracket,
+  determineMatchWinnerId, determineMatchLoserId,
+  type KoTiebreakHint,
+} from './bracket';
 
 export const PHASE_ORDER: QualificationPhase[] = [
   'group_stage', 'r32', 'r16', 'quarters', 'semis', 'third_place', 'champion',
@@ -74,9 +78,16 @@ export function calculateQualificationPoints(
  *   - 'semis'        → finalistas (vencedores de SF)
  *   - 'third_place'  → vencedor do jogo do 3º
  *   - 'champion'     → vencedor da final
+ *
+ * @param hintsByMatchId opcional — mapa match_id → KoTiebreakHint. Quando o palpite
+ *   do usuário em um KO é empate (e ele marca `knockout_advancer`), os jogos reais
+ *   não terão pens preenchidos para esse usuário; o hint indica quem avança.
+ *   Sem este parâmetro, jogos KO empatados sem pens são considerados sem vencedor,
+ *   o que faz a fase correspondente perder esse time. (bug v55)
  */
 export function extractAdvancingTeams(
   matches: Match[],
+  hintsByMatchId?: Map<number, KoTiebreakHint>,
 ): Record<QualificationPhase, Set<number>> {
   const result: Record<QualificationPhase, Set<number>> = {
     group_stage: new Set(), r32: new Set(), r16: new Set(),
@@ -84,7 +95,9 @@ export function extractAdvancingTeams(
     champion: new Set(),
   };
 
-  // Times que avançam dos grupos = home/away dos jogos de R32 (assumindo já populado)
+  // Times que avançam dos grupos = home/away dos jogos de R32 (assumindo já populado).
+  // Cada jogo de R32 tem 2 slots (1º vs 3º melhor, ou 1º vs 2º), totalizando 32 times:
+  // 12 primeiros + 12 segundos + 8 melhores terceiros.
   for (const m of matches) {
     if (m.phase === 'round_of_32') {
       if (m.home_team_id) result.group_stage.add(m.home_team_id);
@@ -92,19 +105,10 @@ export function extractAdvancingTeams(
     }
   }
 
-  // Vencedores de cada fase
-  function winnerOf(m: Match): number | null {
-    if (m.home_score == null || m.away_score == null) return null;
-    if (m.home_score > m.away_score) return m.home_team_id;
-    if (m.away_score > m.home_score) return m.away_team_id;
-    if (m.home_pens != null && m.away_pens != null) {
-      return m.home_pens > m.away_pens ? m.home_team_id : m.away_team_id;
-    }
-    return null;
-  }
-
+  // Vencedores de cada fase — agora usa determineMatchWinnerId do bracket.ts,
+  // que respeita knockout_advancer quando os scores empatam e não há pens.
   for (const m of matches) {
-    const w = winnerOf(m);
+    const w = determineMatchWinnerId(m, hintsByMatchId?.get(m.id));
     if (!w) continue;
     if (m.phase === 'round_of_32')   result.r32.add(w);
     if (m.phase === 'round_of_16')   result.r16.add(w);
@@ -117,16 +121,51 @@ export function extractAdvancingTeams(
 }
 
 /**
- * Para um usuário e seus palpites, simula a árvore e extrai os times
- * que ELE acredita que vão a cada fase. Retorna o mesmo formato de
- * extractAdvancingTeams().
+ * Extrai o VICE (perdedor da final). Não faz parte do PHASE_ORDER nem do
+ * scoring — usado apenas em /estatisticas para exibir um card adicional.
  */
-export function extractUserPredictedTeams(
+export function extractRunnerUp(
+  matches: Match[],
+  hintsByMatchId?: Map<number, KoTiebreakHint>,
+): number | null {
+  const finalMatch = matches.find(m => m.phase === 'final');
+  if (!finalMatch) return null;
+  return determineMatchLoserId(finalMatch, hintsByMatchId?.get(finalMatch.id));
+}
+
+/**
+ * Resultado expandido da simulação por usuário: classificados por fase + vice.
+ */
+export interface UserPrediction {
+  byPhase: Record<QualificationPhase, Set<number>>;
+  /** Perdedor da final (vice) — só faz sentido na visualização, não pontua. */
+  runnerUp: number | null;
+}
+
+/** Estrutura vazia (usada quando os grupos ainda não estão maduros). */
+function emptyPrediction(): UserPrediction {
+  return {
+    byPhase: {
+      group_stage: new Set(), r32: new Set(), r16: new Set(),
+      quarters: new Set(), semis: new Set(), third_place: new Set(),
+      champion: new Set(),
+    },
+    runnerUp: null,
+  };
+}
+
+/**
+ * Para um usuário e seus palpites, simula a árvore e extrai os times
+ * que ELE acredita que vão a cada fase + o vice. Versão "full" usada por
+ * `buildPredictionCensus`. A versão legada `extractUserPredictedTeams` é
+ * mantida abaixo como wrapper para compatibilidade com chamadas externas.
+ */
+export function extractUserPrediction(
   userBets: Bet[],
   allMatches: Match[],
   teams: Team[],
   annexCOptions: AnnexCOption[],
-): Record<QualificationPhase, Set<number>> {
+): UserPrediction {
   const userBetsByMatch = new Map(userBets.map(b => [b.match_id, b]));
   const simMatches: Match[] = allMatches.map(m => {
     const b = userBetsByMatch.get(m.id);
@@ -134,13 +173,7 @@ export function extractUserPredictedTeams(
     return m;
   });
 
-  if (!areAllGroupsMature(simMatches)) {
-    return {
-      group_stage: new Set(), r32: new Set(), r16: new Set(),
-      quarters: new Set(), semis: new Set(), third_place: new Set(),
-      champion: new Set(),
-    };
-  }
+  if (!areAllGroupsMature(simMatches)) return emptyPrediction();
 
   const standings = computeGroupStandings(teams, simMatches);
   const thirds = computeThirdPlaceRanking(standings);
@@ -153,33 +186,65 @@ export function extractUserPredictedTeams(
   }
 
   const resolved = simulateBracket(simMatches, teams, standings, thirds, opt, hints);
-  return extractAdvancingTeams(resolved);
+  // IMPORTANTE: passar hints — o palpite do usuário em KO pode ser empate +
+  // knockout_advancer (sem pens). Sem isso, extractAdvancingTeams perde o
+  // vencedor desses jogos e a fase fica com 1 time a menos.
+  const byPhase = extractAdvancingTeams(resolved, hints);
+  const runnerUp = extractRunnerUp(resolved, hints);
+  return { byPhase, runnerUp };
+}
+
+/**
+ * Wrapper de compatibilidade — assinatura inalterada para callers externos.
+ */
+export function extractUserPredictedTeams(
+  userBets: Bet[],
+  allMatches: Match[],
+  teams: Team[],
+  annexCOptions: AnnexCOption[],
+): Record<QualificationPhase, Set<number>> {
+  return extractUserPrediction(userBets, allMatches, teams, annexCOptions).byPhase;
 }
 
 /**
  * Conta, por (phase, team_id), quantos usuários previram aquele time.
  * Usado para calcular o fator zebra de classificação.
+ *
+ * Também retorna `runnerUpCounts` (team_id → nº de usuários que previram aquele
+ * time como VICE / perdedor da final). Esse dado é puramente para exibição em
+ * /estatisticas e NÃO entra no scoring (não há fase 'runner_up' em PHASE_ORDER).
  */
 export function buildPredictionCensus(
   allUserBets: { userId: string; bets: Bet[] }[],
   allMatches: Match[],
   teams: Team[],
   annexCOptions: AnnexCOption[],
-): { totalUsers: number; counts: Map<string, number> } {
+): {
+  totalUsers: number;
+  counts: Map<string, number>;
+  runnerUpCounts: Map<number, number>;
+} {
   const counts = new Map<string, number>();
+  const runnerUpCounts = new Map<number, number>();
   let totalUsers = 0;
   for (const { bets } of allUserBets) {
     if (bets.length === 0) continue;
     totalUsers++;
-    const predicted = extractUserPredictedTeams(bets, allMatches, teams, annexCOptions);
+    const prediction = extractUserPrediction(bets, allMatches, teams, annexCOptions);
     for (const phase of PHASE_ORDER) {
-      for (const teamId of predicted[phase]) {
+      for (const teamId of prediction.byPhase[phase]) {
         const key = `${phase}:${teamId}`;
         counts.set(key, (counts.get(key) ?? 0) + 1);
       }
     }
+    if (prediction.runnerUp != null) {
+      runnerUpCounts.set(
+        prediction.runnerUp,
+        (runnerUpCounts.get(prediction.runnerUp) ?? 0) + 1,
+      );
+    }
   }
-  return { totalUsers, counts };
+  return { totalUsers, counts, runnerUpCounts };
 }
 
 /** Score row de saída para persistência em `user_qualification_scores`. */
