@@ -173,25 +173,26 @@ export default async function HomePage() {
             </thead>
 
             <tbody>
+              
               <tr>
-                <td>Fase de grupos → 16-avos</td>
-                <td className="text-right font-mono">10</td>
+                <td>Fase de grupos →32-avos</td>
+                <td className="text-right font-mono">5</td>
               </tr>
               <tr>
                 <td>Venceu 16-avos → Oitavas</td>
-                <td className="text-right font-mono">12</td>
+                <td className="text-right font-mono">8</td>
               </tr>
               <tr>
                 <td>Venceu Oitavas → Quartas</td>
-                <td className="text-right font-mono">15</td>
+                <td className="text-right font-mono">12</td>
               </tr>
               <tr>
                 <td>Venceu Quartas → Semis</td>
-                <td className="text-right font-mono">25</td>
+                <td className="text-right font-mono">18</td>
               </tr>
               <tr>
                 <td>Finalista</td>
-                <td className="text-right font-mono">30</td>
+                <td className="text-right font-mono">25</td>
               </tr>
               <tr>
                 <td>Terceiro lugar</td>
@@ -199,11 +200,11 @@ export default async function HomePage() {
               </tr>
               <tr>
                 <td>Vice-campeão</td>
-                <td className="text-right font-mono">30</td>
+                <td className="text-right font-mono">35</td>
               </tr>
               <tr>
                 <td>Campeão</td>
-                <td className="text-right font-mono font-bold">40</td>
+                <td className="text-right font-mono font-bold">50</td>
               </tr>
             </tbody>
           </table>
