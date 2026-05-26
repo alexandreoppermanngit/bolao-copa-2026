@@ -18,6 +18,61 @@ import { TeamNameWithFlag } from './TeamNameWithFlag';
 
 interface Profile { id: string; display_name: string | null; email: string }
 
+/**
+ * Lado escolhido pelo usuário em UMA aposta específica.
+ *   - 'home'    → vitória do mandante (placar OU advancer em KO empatado)
+ *   - 'away'    → vitória do visitante
+ *   - 'draw'    → empate genuíno (apenas fase de grupos)
+ *   - 'pending' → KO empatado sem `knockout_advancer` definido
+ *
+ * Não recalcula pontos. Só decide o LADO para colorir a célula.
+ */
+type PickSide = 'home' | 'away' | 'draw' | 'pending';
+
+function pickSide(bet: Pick<Bet, 'home_score' | 'away_score' | 'knockout_advancer'>, isKO: boolean): PickSide {
+  if (bet.home_score > bet.away_score) return 'home';
+  if (bet.away_score > bet.home_score) return 'away';
+  // Empate
+  if (!isKO) return 'draw';
+  if (bet.knockout_advancer === 'home') return 'home';
+  if (bet.knockout_advancer === 'away') return 'away';
+  return 'pending';
+}
+
+/**
+ * Classes Tailwind por lado, aplicadas nas células Time A / Time B / Placar
+ * da tabela `BetsAuditTable`. Mantemos a coluna ESCOLHIDA com destaque sólido
+ * e a oposta apenas um tom suave (para não competir visualmente).
+ */
+function classesForSide(side: PickSide): { home: string; away: string; score: string } {
+  switch (side) {
+    case 'home':
+      return {
+        home:  'bg-blue-100 border-l-4 border-blue-500 font-bold text-blue-900',
+        away:  'opacity-60',
+        score: 'bg-blue-50 font-bold text-blue-900',
+      };
+    case 'away':
+      return {
+        home:  'opacity-60',
+        away:  'bg-red-100 border-r-4 border-red-500 font-bold text-red-900',
+        score: 'bg-red-50 font-bold text-red-900',
+      };
+    case 'draw':
+      return {
+        home:  'opacity-80',
+        away:  'opacity-80',
+        score: 'bg-amber-100 border border-amber-300 font-bold text-amber-900',
+      };
+    case 'pending':
+      return {
+        home:  'opacity-60',
+        away:  'opacity-60',
+        score: 'bg-gray-100 italic text-gray-600',
+      };
+  }
+}
+
 interface Props {
   initialMatchId: number;
   matches: Match[];
@@ -239,7 +294,10 @@ function BetsAuditTable({
               ? (a.bet.knockout_advancer === 'home' ? a.bet_home_team?.name ?? 'home' : a.bet_away_team?.name ?? 'away')
               : '—';
             const reasonLabel = AUDIT_REASON_LABEL[a.reason];
-            // Cor de status
+            // Lado escolhido (destaque visual). Não recalcula pontuação.
+            const side = pickSide(a.bet, isKO);
+            const cls = classesForSide(side);
+            // Cor de status (continua igual — reflete o porquê dos pontos)
             const statusCls =
               a.reason === 'group_stage_direct' ? 'text-gray-700' :
               a.reason === 'ko_match_correct_same_phase' ? 'text-green-700' :
@@ -251,9 +309,15 @@ function BetsAuditTable({
               <tr key={a.bet.id}>
                 <td>{profile?.display_name ?? profile?.email?.split('@')[0] ?? '?'}</td>
                 {isAdmin && <td className="text-xs font-mono">{profile?.email}</td>}
-                <td>{a.bet_home_team ? <TeamNameWithFlag team={a.bet_home_team} size="sm" /> : <em className="text-gray-400">—</em>}</td>
-                <td>{a.bet_away_team ? <TeamNameWithFlag team={a.bet_away_team} size="sm" /> : <em className="text-gray-400">—</em>}</td>
-                <td className="font-mono text-center">{a.bet.home_score} × {a.bet.away_score}</td>
+                <td className={cls.home}>
+                  {a.bet_home_team ? <TeamNameWithFlag team={a.bet_home_team} size="sm" /> : <em className="text-gray-400">—</em>}
+                </td>
+                <td className={cls.away}>
+                  {a.bet_away_team ? <TeamNameWithFlag team={a.bet_away_team} size="sm" /> : <em className="text-gray-400">—</em>}
+                </td>
+                <td className={`font-mono text-center ${cls.score}`}>
+                  {a.bet.home_score} × {a.bet.away_score}
+                </td>
                 <td className="text-xs">{advLabel}</td>
                 {isKO && (
                   <td className="text-xs">

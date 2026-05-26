@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Bola de futebol clássica (preto e branco) — favicon do Bolão Copa 2026.
+       Next.js App Router detecta /app/icon.svg automaticamente e injeta
+       <link rel="icon" href=... /> no head. Sem dependências externas. -->
+  <circle cx="32" cy="32" r="30" fill="#ffffff" stroke="#111" stroke-width="2"/>
+  <!-- Pentágono central preto -->
+  <polygon points="32,18 42,25.5 38.18,37.6 25.82,37.6 22,25.5" fill="#111"/>
+  <!-- Costuras / sombras radiais (5 linhas saindo do pentágono central) -->
+  <g stroke="#111" stroke-width="2" fill="none">
+    <line x1="32" y1="18" x2="32" y2="6"/>
+    <line x1="42" y1="25.5" x2="52" y2="20"/>
+    <line x1="38.18" y1="37.6" x2="46" y2="52"/>
+    <line x1="25.82" y1="37.6" x2="18" y2="52"/>
+    <line x1="22" y1="25.5" x2="12" y2="20"/>
+  </g>
+  <!-- Pequenos pentágonos pretos nas pontas (estilizados como manchas) -->
+  <circle cx="32" cy="6"  r="3" fill="#111"/>
+  <circle cx="52" cy="20" r="3" fill="#111"/>
+  <circle cx="46" cy="52" r="3" fill="#111"/>
+  <circle cx="18" cy="52" r="3" fill="#111"/>
+  <circle cx="12" cy="20" r="3" fill="#111"/>
+</svg>
