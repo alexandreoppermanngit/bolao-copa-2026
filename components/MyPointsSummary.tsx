@@ -1,6 +1,9 @@
 import { createClient } from '@/lib/supabase/server';
 import { TeamNameWithFlag } from './TeamNameWithFlag';
-import type { Team, UserQualificationScore, QualificationPhase } from '@/types/database';
+import type {
+  Team, UserQualificationScore, QualificationPhase, Match,
+} from '@/types/database';
+import { PHASE_DISPLAY_ORDER, isPhaseCompleted } from '@/lib/bolao/qualification';
 
 interface Props { userId: string }
 
@@ -29,21 +32,46 @@ const PHASE_LABEL: Record<QualificationPhase, string> = {
  */
 export async function MyPointsSummary({ userId }: Props) {
   const supabase = createClient();
-  const [rankRes, qualsRes, betsRes, teamsRes] = await Promise.all([
+  const [rankRes, qualsRes, betsRes, teamsRes, matchesRes] = await Promise.all([
     supabase.from('user_rankings_full').select('*').eq('user_id', userId).maybeSingle(),
-    supabase.from('user_qualification_scores').select('*').eq('user_id', userId).order('phase'),
+    // NB: o `.order('phase')` do Supabase ordena pela ordem física do enum no
+    // Postgres — e a migration 006 colocou 'runner_up' depois de 'champion'
+    // no enum, gerando ordem visualmente errada (3º → Campeão → Vice).
+    // Re-ordenamos no client via PHASE_DISPLAY_ORDER logo abaixo.
+    supabase.from('user_qualification_scores').select('*').eq('user_id', userId),
     supabase.from('bets').select('match_id, points, points_with_zebra').eq('user_id', userId),
     supabase.from('teams').select('id, name, group_code, flag_url'),
+    // matches só para decidir se cada fase já foi CONCLUÍDA — diferencia
+    // "errou" (❌) de "ainda pendente" (⏳) no detalhamento.
+    supabase.from('matches').select('id, phase, group_code, home_score, away_score, home_pens, away_pens'),
   ]);
 
   const rank = rankRes.data as {
     game_points: number; qualification_points: number; total_points: number;
     games_correct: number; qualification_correct: number; position: number;
   } | null;
-  const quals = (qualsRes.data ?? []) as UserQualificationScore[];
+  const qualsRaw = (qualsRes.data ?? []) as UserQualificationScore[];
+  // Ordena pela ordem desejada de exibição (Terceiro → Vice → Campeão no final).
+  const quals = [...qualsRaw].sort((a, b) =>
+    PHASE_DISPLAY_ORDER.indexOf(a.phase as QualificationPhase) -
+    PHASE_DISPLAY_ORDER.indexOf(b.phase as QualificationPhase)
+  );
   const bets = (betsRes.data ?? []) as { match_id: number; points: number; points_with_zebra: number }[];
   const teams = (teamsRes.data ?? []) as Team[];
   const teamById = new Map(teams.map(t => [t.id, t]));
+  const matches = (matchesRes.data ?? []) as Match[];
+
+  // Cache por fase: já foi concluída? — calculado UMA vez para todas as fases.
+  const completedByPhase: Record<QualificationPhase, boolean> = {
+    group_stage: isPhaseCompleted('group_stage', matches),
+    r32:         isPhaseCompleted('r32', matches),
+    r16:         isPhaseCompleted('r16', matches),
+    quarters:    isPhaseCompleted('quarters', matches),
+    semis:       isPhaseCompleted('semis', matches),
+    third_place: isPhaseCompleted('third_place', matches),
+    runner_up:   isPhaseCompleted('runner_up', matches),
+    champion:    isPhaseCompleted('champion', matches),
+  };
 
   // Pontos por jogo: total e quantos com ≥1 pt
   const gamesWithPoints = bets.filter(b => b.points_with_zebra > 0).length;
@@ -80,11 +108,19 @@ export async function MyPointsSummary({ userId }: Props) {
               )}
               {quals.map(q => {
                 const t = teamById.get(q.team_id);
+                const phase = q.phase as QualificationPhase;
+                // Tri-estado:
+                //   ✅ acertou
+                //   ❌ errou (fase já concluída e o time apostado não chegou lá)
+                //   ⏳ pendente (fase ainda não concluída — não dá pra saber)
+                const status = q.is_correct
+                  ? '✅'
+                  : (completedByPhase[phase] ? '❌' : '⏳');
                 return (
                   <tr key={q.id} className="border-t border-white/10">
-                    <td className="py-1">{PHASE_LABEL[q.phase as QualificationPhase]}</td>
+                    <td className="py-1">{PHASE_LABEL[phase]}</td>
                     <td>{t ? <TeamNameWithFlag team={t} size="sm" /> : `#${q.team_id}`}</td>
-                    <td className="text-center">{q.is_correct ? '✅' : '⏳'}</td>
+                    <td className="text-center">{status}</td>
                     <td className="text-right font-mono">{Number(q.points_final).toFixed(1)}</td>
                   </tr>
                 );

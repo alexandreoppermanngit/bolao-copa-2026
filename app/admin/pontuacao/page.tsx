@@ -1,7 +1,8 @@
 import { createClient, requireAdmin } from '@/lib/supabase/server';
 import { redirect } from 'next/navigation';
-import type { Match, Team, Bet, AnnexCOption } from '@/types/database';
+import type { Match, Team, Bet, AnnexCOption, QualificationPhase } from '@/types/database';
 import { buildBetAudit, simulateBracketForUser, AUDIT_REASON_LABEL } from '@/lib/bolao/audit';
+import { PHASE_DISPLAY_ORDER, isPhaseCompleted } from '@/lib/bolao/qualification';
 import { TeamNameWithFlag } from '@/components/TeamNameWithFlag';
 
 export const dynamic = 'force-dynamic';
@@ -35,20 +36,28 @@ export default async function AdminPontuacaoPage({ searchParams }: { searchParam
   let pickedProfile: PickedProfile = null;
   let userQuals: QualRow[] = [];
   let auditRows: ReturnType<typeof buildBetAudit>[] = [];
+  let realMatches: Match[] = [];
 
   if (filterUserId) {
     const [qRes, bRes, pRes, mRes, , annexRes] = await Promise.all([
-      supabase.from('user_qualification_scores').select('*').eq('user_id', filterUserId).order('phase'),
+      // NB: ordem física do enum ('runner_up' após 'champion') gera 3º → Campeão → Vice.
+      // Re-ordenamos no client com PHASE_DISPLAY_ORDER (Terceiro → Vice → Campeão).
+      supabase.from('user_qualification_scores').select('*').eq('user_id', filterUserId),
       supabase.from('bets').select('*').eq('user_id', filterUserId).order('match_id'),
       supabase.from('profiles').select('display_name, email').eq('id', filterUserId).maybeSingle(),
       supabase.from('matches').select('*').order('id'),
       supabase.from('bets').select('*').eq('user_id', filterUserId),
       supabase.from('fifa_annex_c').select('*'),
     ]);
-    userQuals = (qRes.data ?? []) as QualRow[];
+    const qualsRaw = (qRes.data ?? []) as QualRow[];
+    userQuals = [...qualsRaw].sort((a, b) =>
+      PHASE_DISPLAY_ORDER.indexOf(a.phase as QualificationPhase) -
+      PHASE_DISPLAY_ORDER.indexOf(b.phase as QualificationPhase)
+    );
     pickedProfile = (pRes.data ?? null) as PickedProfile;
     const userBets = (bRes.data ?? []) as Bet[];
     const allMatches = (mRes.data ?? []) as Match[];
+    realMatches = allMatches;
     const annexC = (annexRes.data ?? []) as AnnexCOption[];
 
     // Simula bracket do usuário e gera audit para cada bet
@@ -62,6 +71,18 @@ export default async function AdminPontuacaoPage({ searchParams }: { searchParam
       })
       .filter(Boolean) as ReturnType<typeof buildBetAudit>[];
   }
+
+  // Cache "fase já concluída?" — usado no detalhamento por fase (ícone tri-estado).
+  const completedByPhase: Record<QualificationPhase, boolean> = {
+    group_stage: isPhaseCompleted('group_stage', realMatches),
+    r32:         isPhaseCompleted('r32', realMatches),
+    r16:         isPhaseCompleted('r16', realMatches),
+    quarters:    isPhaseCompleted('quarters', realMatches),
+    semis:       isPhaseCompleted('semis', realMatches),
+    third_place: isPhaseCompleted('third_place', realMatches),
+    runner_up:   isPhaseCompleted('runner_up', realMatches),
+    champion:    isPhaseCompleted('champion', realMatches),
+  };
 
   return (
     <div className="space-y-4">
@@ -120,11 +141,16 @@ export default async function AdminPontuacaoPage({ searchParams }: { searchParam
                 )}
                 {userQuals.map(q => {
                   const t = teamById.get(q.team_id);
+                  const phase = q.phase as QualificationPhase;
+                  // Tri-estado: ✅ acertou / ❌ errou (fase já fechou) / ⏳ pendente.
+                  const status = q.is_correct
+                    ? '✅'
+                    : (completedByPhase[phase] ? '❌' : '⏳');
                   return (
                     <tr key={q.id}>
                       <td>{q.phase}</td>
                       <td>{t ? <TeamNameWithFlag team={t} size="sm" /> : `#${q.team_id}`}</td>
-                      <td className="text-center">{q.is_correct ? '✅' : '❌'}</td>
+                      <td className="text-center">{status}</td>
                       <td className="text-right">{q.points_base}</td>
                       <td className="text-right">{(1 + Number(q.factor)).toFixed(3)}×</td>
                       <td className="text-right font-bold">{Number(q.points_final).toFixed(2)}</td>

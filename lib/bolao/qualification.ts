@@ -40,6 +40,70 @@ export const PHASE_ORDER: QualificationPhase[] = [
   'third_place', 'runner_up', 'champion',
 ];
 
+/**
+ * Ordem de EXIBIÇÃO de fases para o usuário final no detalhamento de pontuação.
+ * Coincide com PHASE_ORDER hoje, mas é exportado separadamente para que a UI
+ * NÃO dependa do `.order('phase')` do Supabase (que segue a ordem física do
+ * enum no Postgres — e o enum tem 'runner_up' depois de 'champion' por causa
+ * da migration 006, gerando uma ordem visualmente incorreta).
+ *
+ * Use sempre esta constante para ordenar `quals` no client:
+ *   quals.sort((a, b) => PHASE_DISPLAY_ORDER.indexOf(a.phase) - PHASE_DISPLAY_ORDER.indexOf(b.phase));
+ */
+export const PHASE_DISPLAY_ORDER: QualificationPhase[] = [
+  'group_stage', 'r32', 'r16', 'quarters', 'semis',
+  'third_place', 'runner_up', 'champion',
+];
+
+/**
+ * Decide se uma fase de classificação já foi CONCLUÍDA com base nos jogos
+ * REAIS. "Concluída" = os jogos necessários para determinar quem chegou
+ * àquela fase já têm vencedor decidido.
+ *
+ * Usado pela UI para diferenciar entre "errou" (❌) e "ainda pendente" (⏳)
+ * quando `is_correct = false`. Não interfere no cálculo de pontuação.
+ *
+ * Convenções:
+ *   - Empate em KO sem pens preenchidos é considerado NÃO decidido.
+ *   - `runner_up` e `champion` dependem do mesmo jogo `final`.
+ */
+export function isPhaseCompleted(
+  phase: QualificationPhase,
+  matches: Match[],
+): boolean {
+  switch (phase) {
+    case 'group_stage':
+      // Fase de grupos: 72 jogos (group_stage_1/2/3). Concluída quando
+      // todos têm placar — aí dá pra determinar 12 1ºs + 12 2ºs + 8 melhores 3ºs.
+      return allGroupGamesPlayed(matches);
+    case 'r32':         return allKoDecided(matches, 'round_of_32');
+    case 'r16':         return allKoDecided(matches, 'round_of_16');
+    case 'quarters':    return allKoDecided(matches, 'quarter_finals');
+    case 'semis':       return allKoDecided(matches, 'semi_finals');
+    case 'third_place': return allKoDecided(matches, 'third_place');
+    case 'runner_up':
+    case 'champion':    return allKoDecided(matches, 'final');
+  }
+}
+
+function allGroupGamesPlayed(matches: Match[]): boolean {
+  const group = matches.filter(m =>
+    m.phase === 'group_stage_1' || m.phase === 'group_stage_2' || m.phase === 'group_stage_3'
+  );
+  if (group.length === 0) return false;
+  return group.every(m => m.home_score != null && m.away_score != null);
+}
+
+function allKoDecided(matches: Match[], phase: Match['phase']): boolean {
+  const list = matches.filter(m => m.phase === phase);
+  if (list.length === 0) return false;
+  return list.every(m => {
+    if (m.home_score == null || m.away_score == null) return false;
+    if (m.home_score !== m.away_score) return true;          // vencedor por placar
+    return m.home_pens != null && m.away_pens != null;       // empate → precisa pens
+  });
+}
+
 export function phasePointsBase(phase: QualificationPhase, settings: Settings): number {
   switch (phase) {
     case 'group_stage': return settings.pts_qual_groups;
