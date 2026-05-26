@@ -24,10 +24,12 @@ interface Profile { id: string; display_name: string | null; email: string }
  *   - 'away'    → vitória do visitante
  *   - 'draw'    → empate genuíno (apenas fase de grupos)
  *   - 'pending' → KO empatado sem `knockout_advancer` definido
+ *   - 'none'    → não pintar nada (KO em que os times apostados nem batem
+ *                 com os times reais do jogo selecionado — Caso 3 do spec)
  *
  * Não recalcula pontos. Só decide o LADO para colorir a célula.
  */
-type PickSide = 'home' | 'away' | 'draw' | 'pending';
+type PickSide = 'home' | 'away' | 'draw' | 'pending' | 'none';
 
 function pickSide(bet: Pick<Bet, 'home_score' | 'away_score' | 'knockout_advancer'>, isKO: boolean): PickSide {
   if (bet.home_score > bet.away_score) return 'home';
@@ -40,9 +42,37 @@ function pickSide(bet: Pick<Bet, 'home_score' | 'away_score' | 'knockout_advance
 }
 
 /**
+ * Em jogos de mata-mata o usuário pode ter apostado times que NÃO são os
+ * que estão jogando o jogo real selecionado. Esse helper retorna true se
+ * os 2 times do palpite coincidem com os 2 times reais (independente do
+ * mando — cobre Caso 2 do spec, "Brasil x França" vs "França x Brasil").
+ *
+ * Para fase de grupos os slots são fixos, então sempre retorna true.
+ */
+function betTeamsMatchRealMatch(
+  bet: { bet_home_team: Team | null; bet_away_team: Team | null },
+  realHomeId: number | null,
+  realAwayId: number | null,
+  isKO: boolean,
+): boolean {
+  if (!isKO) return true;
+  const bh = bet.bet_home_team?.id ?? null;
+  const ba = bet.bet_away_team?.id ?? null;
+  if (bh == null || ba == null || realHomeId == null || realAwayId == null) return false;
+  return (
+    (bh === realHomeId && ba === realAwayId) ||
+    (bh === realAwayId && ba === realHomeId)
+  );
+}
+
+/**
  * Classes Tailwind por lado, aplicadas nas células Time A / Time B / Placar
- * da tabela `BetsAuditTable`. Mantemos a coluna ESCOLHIDA com destaque sólido
- * e a oposta apenas um tom suave (para não competir visualmente).
+ * da `BetsAuditTable`.
+ *
+ * Refinamentos da v61 (sobre v60):
+ *   - Vitória home/away: NÃO usar `font-bold` no placar (só no nome do time).
+ *   - Empate: placar em `font-bold` + CINZA (era amarelo). Nomes neutros.
+ *   - 'none': sem destaque (mata-mata em que os times nem batem).
  */
 function classesForSide(side: PickSide): { home: string; away: string; score: string } {
   switch (side) {
@@ -50,19 +80,19 @@ function classesForSide(side: PickSide): { home: string; away: string; score: st
       return {
         home:  'bg-blue-100 border-l-4 border-blue-500 font-bold text-blue-900',
         away:  'opacity-60',
-        score: 'bg-blue-50 font-bold text-blue-900',
+        score: 'bg-blue-50 text-blue-900',  // sem font-bold
       };
     case 'away':
       return {
         home:  'opacity-60',
         away:  'bg-red-100 border-r-4 border-red-500 font-bold text-red-900',
-        score: 'bg-red-50 font-bold text-red-900',
+        score: 'bg-red-50 text-red-900',  // sem font-bold
       };
     case 'draw':
       return {
-        home:  'opacity-80',
-        away:  'opacity-80',
-        score: 'bg-amber-100 border border-amber-300 font-bold text-amber-900',
+        home:  '',
+        away:  '',
+        score: 'bg-gray-200 font-bold text-gray-800',  // empate: CINZA + bold
       };
     case 'pending':
       return {
@@ -70,6 +100,8 @@ function classesForSide(side: PickSide): { home: string; away: string; score: st
         away:  'opacity-60',
         score: 'bg-gray-100 italic text-gray-600',
       };
+    case 'none':
+      return { home: '', away: '', score: '' };
   }
 }
 
@@ -81,10 +113,16 @@ interface Props {
   profiles: Profile[];
   annexCOptions: AnnexCOption[];
   isAdmin: boolean;
+  /**
+   * Posição no ranking geral por user_id (vinda da view user_rankings_full).
+   * Quando ausente para um user, ele cai pro fim da lista (Infinity).
+   */
+  rankPositions?: Record<string, number>;
 }
 
 export function MatchComparison({
   initialMatchId, matches, teams, bets, profiles, annexCOptions, isAdmin,
+  rankPositions = {},
 }: Props) {
   const [selectedId, setSelectedId] = useState<number>(initialMatchId);
 
@@ -128,10 +166,10 @@ export function MatchComparison({
     return result;
   }, [selectedMatch, isKO, bets, matches, teams, annexCOptions]);
 
-  // Constrói o audit de cada bet
+  // Constrói o audit de cada bet — depois ordena pelo ranking geral.
   const audits = useMemo<BetAudit[]>(() => {
     if (!selectedMatch) return [];
-    return betsForMatch.map(b => {
+    const raw = betsForMatch.map(b => {
       const userSim = simByUser.get(b.user_id) ?? matches;
       return buildBetAudit({
         bet: b, match: selectedMatch,
@@ -139,7 +177,11 @@ export function MatchComparison({
         allMatches: matches, teamById,
       });
     });
-  }, [betsForMatch, selectedMatch, simByUser, matches, teamById]);
+    // Ordenação por posição no ranking geral (user_rankings_full.position).
+    // Usuário sem entrada no ranking (ex.: nunca pontuou) cai no fim.
+    const posOf = (id: string): number => rankPositions[id] ?? Number.POSITIVE_INFINITY;
+    return raw.sort((a, b) => posOf(a.bet.user_id) - posOf(b.bet.user_id));
+  }, [betsForMatch, selectedMatch, simByUser, matches, teamById, rankPositions]);
 
   function teamForOfficialSide(m: Match | undefined, side: 'home'|'away'): Team | null {
     if (!m) return null;
@@ -183,7 +225,15 @@ export function MatchComparison({
             distribution={distribution}
             isKO={!!isKO}
           />
-          <BetsAuditTable audits={audits} profileById={profileById} isAdmin={isAdmin} isKO={!!isKO} />
+          <BetsAuditTable
+            audits={audits}
+            profileById={profileById}
+            isAdmin={isAdmin}
+            isKO={!!isKO}
+            realHomeId={selectedMatch.home_team_id}
+            realAwayId={selectedMatch.away_team_id}
+            rankPositions={rankPositions}
+          />
         </>
       )}
     </div>
@@ -257,18 +307,22 @@ function StatBar({ label, pct, color }: { label: string; pct: number; color: str
 }
 
 function BetsAuditTable({
-  audits, profileById, isAdmin, isKO,
+  audits, profileById, isAdmin, isKO, realHomeId, realAwayId, rankPositions,
 }: {
   audits: BetAudit[];
   profileById: Map<string, Profile>;
   isAdmin: boolean;
   isKO: boolean;
+  realHomeId: number | null;
+  realAwayId: number | null;
+  rankPositions: Record<string, number>;
 }) {
   return (
     <div className="bg-white rounded-xl shadow-sm overflow-x-auto">
       <table className="spreadsheet-table text-xs">
         <thead>
           <tr>
+            <th>#</th>
             <th>Usuário</th>
             {isAdmin && <th>Email</th>}
             <th>Time A (palpite)</th>
@@ -283,7 +337,7 @@ function BetsAuditTable({
         </thead>
         <tbody>
           {audits.length === 0 && (
-            <tr><td colSpan={isAdmin ? (isKO ? 10 : 9) : (isKO ? 9 : 8)} className="text-center py-6 text-gray-500">
+            <tr><td colSpan={isAdmin ? (isKO ? 11 : 10) : (isKO ? 10 : 9)} className="text-center py-6 text-gray-500">
               Nenhuma aposta registrada para este jogo.
             </td></tr>
           )}
@@ -294,9 +348,22 @@ function BetsAuditTable({
               ? (a.bet.knockout_advancer === 'home' ? a.bet_home_team?.name ?? 'home' : a.bet_away_team?.name ?? 'away')
               : '—';
             const reasonLabel = AUDIT_REASON_LABEL[a.reason];
-            // Lado escolhido (destaque visual). Não recalcula pontuação.
-            const side = pickSide(a.bet, isKO);
+
+            // Decide o lado escolhido — mas se for KO e os times do palpite
+            // NÃO baterem com os times reais do jogo selecionado, ignora o
+            // destaque (Caso 3 do spec). Pontuação pode ainda existir pelo
+            // confronto equivalente em outra fase, mas o destaque visual
+            // dessa página representa apenas O JOGO MOSTRADO.
+            const teamsMatch = betTeamsMatchRealMatch(a, realHomeId, realAwayId, isKO);
+            const side: PickSide = teamsMatch ? pickSide(a.bet, isKO) : 'none';
             const cls = classesForSide(side);
+
+            // Pontos > 0 → destaque verde (independente do destaque do lado).
+            const hasPts = a.points > 0;
+            const hasPtsZ = Number(a.points_with_zebra) > 0;
+            const ptsCls   = hasPts  ? 'bg-green-100 text-green-800 font-semibold' : '';
+            const ptsZCls  = hasPtsZ ? 'bg-green-100 text-green-800 font-bold'    : 'font-semibold';
+
             // Cor de status (continua igual — reflete o porquê dos pontos)
             const statusCls =
               a.reason === 'group_stage_direct' ? 'text-gray-700' :
@@ -305,8 +372,14 @@ function BetsAuditTable({
               a.reason === 'ko_match_correct_other_phase' ? 'text-purple-700' :
               a.reason === 'ko_match_not_played' ? 'text-red-700' :
               'text-amber-700';
+
+            const pos = rankPositions[a.bet.user_id];
+
             return (
               <tr key={a.bet.id}>
+                <td className="text-center font-mono text-gray-600">
+                  {pos ? `#${pos}` : '—'}
+                </td>
                 <td>{profile?.display_name ?? profile?.email?.split('@')[0] ?? '?'}</td>
                 {isAdmin && <td className="text-xs font-mono">{profile?.email}</td>}
                 <td className={cls.home}>
@@ -331,8 +404,8 @@ function BetsAuditTable({
                   </td>
                 )}
                 <td className={`text-xs ${statusCls}`}>{reasonLabel}</td>
-                <td className="text-center">{a.points}</td>
-                <td className="text-center font-semibold">{Number(a.points_with_zebra).toFixed(1)}</td>
+                <td className={`text-center ${ptsCls}`}>{a.points}</td>
+                <td className={`text-center ${ptsZCls}`}>{Number(a.points_with_zebra).toFixed(1)}</td>
               </tr>
             );
           })}

@@ -32,12 +32,22 @@ export default async function ComparativoPage({ searchParams }: { searchParams: 
   // Senão, vê apenas a própria aposta (RLS naturalmente já restringe via cliente autenticado).
   const canSeeAllBets = isAdmin || lock.locked;
 
-  // 2) Dados públicos (matches, teams, annexC) — sempre via cliente autenticado
-  const [{ data: matches }, { data: teams }, { data: annexC }] = await Promise.all([
+  // 2) Dados públicos (matches, teams, annexC, ranking) — sempre via cliente autenticado.
+  // user_rankings_full é VIEW pública (RLS permite SELECT a todos) — fonte da ordenação
+  // que a tabela de comparativo agora usa.
+  const [
+    { data: matches }, { data: teams }, { data: annexC }, { data: rankRaw },
+  ] = await Promise.all([
     supabase.from('matches').select('*').order('id'),
     supabase.from('teams').select('*'),
     supabase.from('fifa_annex_c').select('*'),
+    supabase.from('user_rankings_full').select('user_id, position').order('position'),
   ]);
+  // Map serializável para passar ao Client Component (vira { [user_id]: position }).
+  const rankPositions: Record<string, number> = {};
+  for (const r of (rankRaw ?? []) as { user_id: string; position: number }[]) {
+    rankPositions[r.user_id] = r.position;
+  }
 
   // 3) bets + profiles — fonte depende de canSeeAllBets
   let bets: Bet[] = [];
@@ -55,7 +65,10 @@ export default async function ComparativoPage({ searchParams }: { searchParams: 
     ]);
     bets = (betsRaw ?? []) as Bet[];
     profiles = (profilesRaw ?? []).map((p) => {
-      const row = p as unknown as  { id: string; display_name: string | null; email?: string };
+      // Cast via `unknown` é necessário porque o Supabase retorna `ParserError<...>`
+      // quando o argumento de `.select()` é uma string dinâmica (profileCols ternário),
+      // e o TS recusa o cast direto. `as unknown as <T>` é a forma canônica.
+      const row = p as unknown as { id: string; display_name: string | null; email?: string };
       return {
         id: row.id,
         display_name: row.display_name,
@@ -105,6 +118,7 @@ export default async function ComparativoPage({ searchParams }: { searchParams: 
         profiles={profiles}
         annexCOptions={(annexC ?? []) as AnnexCOption[]}
         isAdmin={isAdmin}
+        rankPositions={rankPositions}
       />
     </div>
   );
