@@ -3,7 +3,10 @@ import { createClient } from '@/lib/supabase/server';
 export const dynamic = 'force-dynamic';
 
 interface FullRow {
-  user_id: string; email: string; display_name: string | null;
+  user_id: string;
+  // Migration 007: views públicas devolvem email = null (privacidade).
+  email: string | null;
+  display_name: string | null;
   game_points: number; game_points_base: number;
   qualification_points: number; qualification_points_base: number;
 }
@@ -53,7 +56,7 @@ export default async function RankingZebraPage() {
             {enriched.map((r, i) => (
               <tr key={r.user_id} className={i < 3 ? 'font-semibold' : ''}>
                 <td className="text-center">{i + 1}</td>
-                <td>{r.display_name ?? r.email.split('@')[0]}</td>
+                <td>{r.display_name ?? 'Anônimo'}</td>
                 <td className="text-right font-mono">{r.gameBonus.toFixed(2)}</td>
                 <td className="text-right font-mono">{r.qualBonus.toFixed(2)}</td>
                 <td className="text-right font-mono font-bold">{r.totalBonus.toFixed(2)}</td>

@@ -8,7 +8,12 @@ import { TeamNameWithFlag } from '@/components/TeamNameWithFlag';
 export const dynamic = 'force-dynamic';
 
 interface RankRow {
-  user_id: string; email: string; display_name: string | null;
+  user_id: string;
+  // Migration 007: views devolvem null (privacidade pública). O email real
+  // é buscado em paralelo de `public.profiles` (admin tem acesso pela
+  // policy "Public read profiles") e exibido via `emailByUserId`.
+  email: string | null;
+  display_name: string | null;
   game_points: number; game_points_base: number;
   qualification_points: number; qualification_points_base: number;
   total_points: number; position: number;
@@ -24,12 +29,20 @@ export default async function AdminPontuacaoPage({ searchParams }: { searchParam
   if (!isAdmin) redirect('/');
 
   const supabase = createClient();
-  const [{ data: rank }, { data: teamsRaw }] = await Promise.all([
+  const [{ data: rank }, { data: teamsRaw }, { data: profilesRaw }] = await Promise.all([
     supabase.from('user_rankings_full').select('*').order('position'),
     supabase.from('teams').select('*'),
+    // Email real vem de profiles (não da view) — migration 007 mascara
+    // email nas views públicas. Só admin chega aqui (requireAdmin acima).
+    supabase.from('profiles').select('id, email'),
   ]);
   const teams = (teamsRaw ?? []) as Team[];
   const teamById = new Map(teams.map(t => [t.id, t]));
+  const emailByUserId = new Map<string, string>(
+    ((profilesRaw ?? []) as { id: string; email: string | null }[])
+      .filter(p => p.email != null)
+      .map(p => [p.id, p.email as string])
+  );
 
   type PickedProfile = { display_name: string | null; email: string } | null;
   const filterUserId = searchParams.user;
@@ -107,17 +120,21 @@ export default async function AdminPontuacaoPage({ searchParams }: { searchParam
             </tr>
           </thead>
           <tbody>
-            {((rank ?? []) as RankRow[]).map(r => (
+            {((rank ?? []) as RankRow[]).map(r => {
+              // Email vem de profiles (admin tem acesso) — view pública entrega null.
+              const email = emailByUserId.get(r.user_id) ?? '';
+              return (
               <tr key={r.user_id} className={filterUserId === r.user_id ? 'bg-yellow-50' : ''}>
                 <td className="text-center font-bold">{r.position}</td>
-                <td>{r.display_name ?? r.email.split('@')[0]}</td>
-                <td className="font-mono">{r.email}</td>
+                <td>{r.display_name ?? (email ? email.split('@')[0] : 'Anônimo')}</td>
+                <td className="font-mono">{email || '—'}</td>
                 <td className="text-right font-mono">{Number(r.game_points).toFixed(1)}</td>
                 <td className="text-right font-mono">{Number(r.qualification_points).toFixed(1)}</td>
                 <td className="text-right font-mono font-bold">{Number(r.total_points).toFixed(1)}</td>
                 <td><a className="text-brand-500 underline" href={`/admin/pontuacao?user=${r.user_id}`}>Ver →</a></td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>

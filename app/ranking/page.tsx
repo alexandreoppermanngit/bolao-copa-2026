@@ -5,7 +5,9 @@ export const dynamic = 'force-dynamic';
 interface RankingRow {
   user_id: string;
   display_name: string | null;
-  email: string;
+  // Migration 007: views públicas devolvem email = null (privacidade).
+  // Mantemos a coluna no tipo apenas por compatibilidade com `select('*')`.
+  email: string | null;
   total_points: number;
   correct_results: number;
   exact_scores: number;
@@ -53,7 +55,7 @@ export default async function RankingPage() {
                 <td className="text-center">
                   {r.position === 1 ? '🥇 1' : r.position === 2 ? '🥈 2' : r.position === 3 ? '🥉 3' : r.position}
                 </td>
-                <td>{r.display_name ?? r.email.split('@')[0]}</td>
+                <td>{r.display_name ?? 'Anônimo'}</td>
                 <td className="text-right font-mono">{Number(r.total_points).toFixed(1)}</td>
                 <td className="text-center">{r.correct_results}</td>
                 <td className="text-center">{r.exact_scores}</td>
