@@ -2,6 +2,7 @@ import { createClient, createServiceRoleClient, requireAdmin } from '@/lib/supab
 import type { Match, Team, Bet, AnnexCOption, Settings } from '@/types/database';
 import { MatchComparison } from '@/components/MatchComparison';
 import { getGlobalLockStatus } from '@/lib/bolao/lockStatus';
+import { pickInitialMatchId } from '@/lib/bolao/matchSchedule';
 
 // Página dinâmica: sempre buscar bets/profiles frescos do Supabase ao montar.
 // Combinado com staleTimes.dynamic = 0 no next.config.js, garante que
@@ -111,7 +112,16 @@ export default async function ComparativoPage({ searchParams }: { searchParams: 
       </div>
 
       <MatchComparison
-        initialMatchId={searchParams.jogo ? Number(searchParams.jogo) : 1}
+        initialMatchId={
+          // Prioridade: ?jogo=X na URL (compartilhamento de link).
+          // Sem param, escolhe automaticamente:
+          //   1) jogo em andamento (janela de 2h a partir do kickoff)
+          //   2) próximo futuro mais próximo
+          //   3) último jogo da lista
+          searchParams.jogo
+            ? Number(searchParams.jogo)
+            : (pickInitialMatchId((matches ?? []) as Match[]) ?? 1)
+        }
         matches={(matches ?? []) as Match[]}
         teams={(teams ?? []) as Team[]}
         bets={bets}
