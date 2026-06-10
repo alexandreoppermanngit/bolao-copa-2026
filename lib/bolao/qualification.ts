@@ -234,6 +234,12 @@ function emptyPrediction(): UserPrediction {
  * Para um usuário e seus palpites, simula a árvore e extrai os times
  * que ELE acredita que vão a cada fase. Usada por `buildPredictionCensus`.
  * `extractUserPredictedTeams` (abaixo) é o wrapper legado.
+ *
+ * Migration 008: quando as bets já têm `bet_home_team_id`/`bet_away_team_id`
+ * preenchidos, usamos esses snapshots como override do bracket — assim a
+ * extração não depende mais de `areAllGroupsMature` quando os snapshots
+ * suprem os slots necessários. Bets sem snapshot caem na simulação
+ * tradicional (compat com bets antigas pré-backfill).
  */
 export function extractUserPrediction(
   userBets: Bet[],
@@ -242,32 +248,47 @@ export function extractUserPrediction(
   annexCOptions: AnnexCOption[],
 ): UserPrediction {
   const userBetsByMatch = new Map(userBets.map(b => [b.match_id, b]));
+
+  // Para cada match: aplicar scores E (quando disponível) os snapshots
+  // dos times do palpite. Para os matches KO em que o snapshot existe,
+  // os `home_team_id`/`away_team_id` ficam definidos antes da simulação
+  // — então `extractAdvancingTeams` vê o time apostado correto mesmo se
+  // o bracket oficial estava zerado.
   const simMatches: Match[] = allMatches.map(m => {
     const b = userBetsByMatch.get(m.id);
-    if (b) return { ...m, home_score: b.home_score, away_score: b.away_score };
-    return m;
+    if (!b) return m;
+    const next: Match = {
+      ...m,
+      home_score: b.home_score,
+      away_score: b.away_score,
+    };
+    if (b.bet_home_team_id != null) next.home_team_id = b.bet_home_team_id;
+    if (b.bet_away_team_id != null) next.away_team_id = b.bet_away_team_id;
+    return next;
   });
-
-  if (!areAllGroupsMature(simMatches)) return emptyPrediction();
-
-  const standings = computeGroupStandings(teams, simMatches);
-  const thirds = computeThirdPlaceRanking(standings);
-  const key = sortedKeyOfQualifyingThirds(thirds);
-  const opt = key.length === 8 ? findAnnexCOption(key, annexCOptions) : null;
 
   const hints = new Map<number, KoTiebreakHint>();
   for (const b of userBets) {
     if (b.knockout_advancer) hints.set(b.match_id, { knockout_advancer: b.knockout_advancer });
   }
 
+  // Se os grupos do usuário não estão maduros, ainda assim TENTAMOS extrair
+  // o que dá a partir dos snapshots. Para isso, pulamos `simulateBracket`
+  // (que precisa de standings dos grupos) e chamamos `extractAdvancingTeams`
+  // direto sobre `simMatches` — os slots que têm snapshot vão render times,
+  // os que não têm vão render null e simplesmente não entram nas fases.
+  if (!areAllGroupsMature(simMatches)) {
+    return { byPhase: extractAdvancingTeams(simMatches, hints) };
+  }
+
+  // Caminho completo: simula a árvore para preencher os slots que NÃO têm
+  // snapshot, usando standings + Anexo C + hints.
+  const standings = computeGroupStandings(teams, simMatches);
+  const thirds = computeThirdPlaceRanking(standings);
+  const key = sortedKeyOfQualifyingThirds(thirds);
+  const opt = key.length === 8 ? findAnnexCOption(key, annexCOptions) : null;
   const resolved = simulateBracket(simMatches, teams, standings, thirds, opt, hints);
-  // IMPORTANTE: passar hints — o palpite do usuário em KO pode ser empate +
-  // knockout_advancer (sem pens). Sem isso, extractAdvancingTeams perde o
-  // vencedor desses jogos e a fase fica com 1 time a menos.
-  // `runner_up` é populado automaticamente pelo extractAdvancingTeams
-  // (perdedor da final).
-  const byPhase = extractAdvancingTeams(resolved, hints);
-  return { byPhase };
+  return { byPhase: extractAdvancingTeams(resolved, hints) };
 }
 
 /**

@@ -80,16 +80,27 @@ export function BetsAdminTable({ bets, profiles, matches, teams, annexCOptions }
     const result = new Map<string, Map<number, { home: Team | null; away: Team | null }>>();
     for (const [userId, userBets] of betsByUser) {
       const teamsForMatch = new Map<number, { home: Team | null; away: Team | null }>();
-      // Para grupos, times são os oficiais
-      for (const m of matches) {
-        if (m.group_code) {
-          teamsForMatch.set(m.id, {
-            home: m.home_team_id ? teamById.get(m.home_team_id) ?? null : null,
-            away: m.away_team_id ? teamById.get(m.away_team_id) ?? null : null,
-          });
-        }
+
+      // 1) PRIORIDADE: snapshots gravados nas próprias bets (migration 008).
+      //    Funciona mesmo para KO sem maturidade de grupos e sem bracket oficial.
+      for (const b of userBets.values()) {
+        const home = b.bet_home_team_id ? teamById.get(b.bet_home_team_id) ?? null : null;
+        const away = b.bet_away_team_id ? teamById.get(b.bet_away_team_id) ?? null : null;
+        if (home || away) teamsForMatch.set(b.match_id, { home, away });
       }
-      // Aplica palpites do usuário
+
+      // 2) Para grupos sem snapshot: times oficiais do match.
+      for (const m of matches) {
+        if (!m.group_code) continue;
+        const cur = teamsForMatch.get(m.id);
+        if (cur && cur.home && cur.away) continue;
+        teamsForMatch.set(m.id, {
+          home: cur?.home ?? (m.home_team_id ? teamById.get(m.home_team_id) ?? null : null),
+          away: cur?.away ?? (m.away_team_id ? teamById.get(m.away_team_id) ?? null : null),
+        });
+      }
+
+      // 3) Fallback (KO sem snapshot): simula bracket do usuário se maduro.
       const localMatches = matches.map(m => {
         const ub = userBets.get(m.id);
         if (ub) return { ...m, home_score: ub.home_score, away_score: ub.away_score };
@@ -107,17 +118,21 @@ export function BetsAdminTable({ bets, profiles, matches, teams, annexCOptions }
         const resolved = simulateBracket(localMatches, teams, standings, thirds, opt, hints);
         for (const m of resolved) {
           if (m.group_code) continue;
+          const cur = teamsForMatch.get(m.id);
+          if (cur && cur.home && cur.away) continue;  // snapshot ganha
           teamsForMatch.set(m.id, {
-            home: m.home_team_id ? teamById.get(m.home_team_id) ?? null : null,
-            away: m.away_team_id ? teamById.get(m.away_team_id) ?? null : null,
+            home: cur?.home ?? (m.home_team_id ? teamById.get(m.home_team_id) ?? null : null),
+            away: cur?.away ?? (m.away_team_id ? teamById.get(m.away_team_id) ?? null : null),
           });
         }
       } else {
-        // KO sem maturidade → times vazios
+        // KO sem maturidade e sem snapshot → mantém qualquer snapshot parcial, resto null.
         for (const m of matches) {
-          if (!m.group_code) teamsForMatch.set(m.id, { home: null, away: null });
+          if (m.group_code) continue;
+          if (!teamsForMatch.has(m.id)) teamsForMatch.set(m.id, { home: null, away: null });
         }
       }
+
       result.set(userId, teamsForMatch);
     }
     return result;

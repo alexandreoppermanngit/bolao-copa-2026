@@ -197,6 +197,14 @@ export function BetForm({ userId, matches, teams, existingBets, annexCOptions, s
       return next;
     });
 
+    // Migration 008 — snapshot dos times naquele slot. Para grupos
+    // teamForMatchSide vai do team_id direto; para KO resolve via
+    // resolvedMatches. Se ainda não resolvido (KO com palpites parciais
+    // de grupo), envia null — o backfill cuida depois.
+    const matchObj = matches.find(x => x.id === matchId) ?? null;
+    const snapHome = matchObj ? teamForMatchSide(matchObj, 'home')?.id ?? null : null;
+    const snapAway = matchObj ? teamForMatchSide(matchObj, 'away')?.id ?? null : null;
+
     let errorMsg: string | null = null;
     try {
       const res = await fetch('/api/bets/save', {
@@ -208,6 +216,8 @@ export function BetForm({ userId, matches, teams, existingBets, annexCOptions, s
           home_score: hs,
           away_score: as,
           knockout_advancer: isKO && hs === as ? (lb.advancer ?? null) : null,
+          bet_home_team_id: snapHome,
+          bet_away_team_id: snapAway,
         }),
       });
       const j = await res.json().catch(() => null);

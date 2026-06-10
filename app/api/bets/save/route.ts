@@ -30,6 +30,14 @@ const Body = z.object({
   home_score: z.number().int().min(0).max(30),
   away_score: z.number().int().min(0).max(30),
   knockout_advancer: z.enum(['home', 'away']).optional().nullable(),
+  // Migration 008: snapshot dos times do palpite. Opcionais por compat
+  // com clientes antigos que ainda não enviam. Quando ausentes ou null,
+  // o upsert apenas não os define nesta operação — o backfill cuida do
+  // resto. Valores recebidos só são aplicados se forem números válidos
+  // (>= 1), nunca apagam um snapshot já gravado a partir de cliente
+  // que não os envia (ver lógica de upsert abaixo).
+  bet_home_team_id: z.number().int().positive().optional().nullable(),
+  bet_away_team_id: z.number().int().positive().optional().nullable(),
 });
 
 function jsonError(msg: string, status = 500) {
@@ -96,14 +104,28 @@ export async function POST(req: NextRequest) {
 
     // 5) Persistir (service role para garantir, mas validação acima já foi feita)
     const sb = createServiceRoleClient();
-    const { data: saved, error } = await sb.from('bets').upsert({
+    // Migration 008: incluir snapshots dos times APENAS quando o cliente
+    // os envia explicitamente. Cliente antigo (ou backfill rodando depois)
+    // não envia → manter o que já está no banco. Cliente novo (BetForm
+    // atualizado) envia o que está vendo no slot naquele momento.
+    const upsertRow: Record<string, unknown> = {
       user_id: user.id,
       match_id: parsed.data.match_id,
       home_score: parsed.data.home_score,
       away_score: parsed.data.away_score,
       knockout_advancer: (parsed.data.home_score === parsed.data.away_score)
         ? (parsed.data.knockout_advancer ?? null) : null,
-    }, { onConflict: 'user_id,match_id' }).select('match_id, home_score, away_score, knockout_advancer').single();
+    };
+    if (parsed.data.bet_home_team_id !== undefined) {
+      upsertRow.bet_home_team_id = parsed.data.bet_home_team_id;
+    }
+    if (parsed.data.bet_away_team_id !== undefined) {
+      upsertRow.bet_away_team_id = parsed.data.bet_away_team_id;
+    }
+    const { data: saved, error } = await sb.from('bets').upsert(
+      upsertRow,
+      { onConflict: 'user_id,match_id' },
+    ).select('match_id, home_score, away_score, knockout_advancer, bet_home_team_id, bet_away_team_id').single();
 
     if (error) {
       safeLog({

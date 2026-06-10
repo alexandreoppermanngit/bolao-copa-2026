@@ -51,6 +51,11 @@ export interface Bet {
   points: number;
   points_with_zebra: number;
   updated_at: string;
+  // Migration 008 — snapshot dos times do palpite. Nullable porque bets
+  // criadas antes da migration ficam null até o backfill rodar (e bets
+  // de KO em que a simulação não conseguiu resolver permanecem null).
+  bet_home_team_id?: number | null;
+  bet_away_team_id?: number | null;
 }
 
 export interface Profile {

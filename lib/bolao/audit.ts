@@ -86,14 +86,31 @@ export function buildBetAudit(params: {
   const realHome = match.home_team_id ? teamById.get(match.home_team_id) ?? null : null;
   const realAway = match.away_team_id ? teamById.get(match.away_team_id) ?? null : null;
 
-  // Times que o usuário ENXERGAVA nesse match (em grupo, é igual aos oficiais)
+  // Times que o usuário ENXERGAVA nesse match.
+  //
+  // Migration 008: prioridade absoluta para o SNAPSHOT salvo na bet
+  // (bet_home_team_id / bet_away_team_id). Esses campos foram preenchidos
+  // pelo /api/bets/save (front envia o que está vendo) ou pelo backfill
+  // — e são imunes a recalc/reset do bracket oficial.
+  //
+  // Fallback (bets antigas pré-008 ou backfill não rodado): para fase de
+  // grupos, usar `realHome`/`realAway` (que são fixos no DB); para KO,
+  // cair na simulação como antes.
   const userMatch = simulatedMatchesByUser.find(m => m.id === match.id);
-  const betHome = isGroupPhase
-    ? realHome
-    : (userMatch?.home_team_id ? teamById.get(userMatch.home_team_id) ?? null : null);
-  const betAway = isGroupPhase
-    ? realAway
-    : (userMatch?.away_team_id ? teamById.get(userMatch.away_team_id) ?? null : null);
+
+  const snapHomeId = bet.bet_home_team_id ?? null;
+  const snapAwayId = bet.bet_away_team_id ?? null;
+
+  const betHome = snapHomeId
+    ? (teamById.get(snapHomeId) ?? null)
+    : (isGroupPhase
+        ? realHome
+        : (userMatch?.home_team_id ? teamById.get(userMatch.home_team_id) ?? null : null));
+  const betAway = snapAwayId
+    ? (teamById.get(snapAwayId) ?? null)
+    : (isGroupPhase
+        ? realAway
+        : (userMatch?.away_team_id ? teamById.get(userMatch.away_team_id) ?? null : null));
 
   const hasRealResult = match.home_score != null && match.away_score != null;
 
