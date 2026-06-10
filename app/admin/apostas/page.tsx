@@ -2,6 +2,7 @@ import { createClient, requireAdmin } from '@/lib/supabase/server';
 import { redirect } from 'next/navigation';
 import type { Bet, Team, Match, AnnexCOption } from '@/types/database';
 import { BetsAdminTable } from '@/components/BetsAdminTable';
+import { fetchAll } from '@/lib/supabase/fetchAll';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,18 +11,22 @@ export default async function AdminBetsPage() {
   if (!isAdmin) redirect('/');
 
   const supabase = createClient();
-  const [
-    { data: bets },
-    { data: profiles },
-    { data: matches },
-    { data: teams },
-    { data: annexC },
-  ] = await Promise.all([
-    supabase.from('bets').select('*').limit(10000),
-    supabase.from('profiles').select('id, display_name, email'),
-    supabase.from('matches').select('*').order('id'),
-    supabase.from('teams').select('*'),
-    supabase.from('fifa_annex_c').select('*'),
+  // v68 — PAGINAÇÃO. `.limit(10000)` parecia resolver, mas o PostgREST do
+  // Supabase tem `max-rows = 1000` por default no plano hosted — qualquer
+  // `.limit(N>1000)` é truncado pra 1000. Resultado: o export CSV (que vem
+  // dessas bets) saía com no máximo 1000 linhas, não 1.556. Solução: fetchAll
+  // com `.range()` explícito por página.
+  const [bets, profiles, matches, teams, annexC] = await Promise.all([
+    fetchAll<Bet>((from, to) =>
+      supabase.from('bets').select('*').range(from, to)),
+    fetchAll<{ id: string; display_name: string | null; email: string }>((from, to) =>
+      supabase.from('profiles').select('id, display_name, email').range(from, to)),
+    fetchAll<Match>((from, to) =>
+      supabase.from('matches').select('*').order('id').range(from, to)),
+    fetchAll<Team>((from, to) =>
+      supabase.from('teams').select('*').range(from, to)),
+    fetchAll<AnnexCOption>((from, to) =>
+      supabase.from('fifa_annex_c').select('*').range(from, to)),
   ]);
 
   return (
@@ -37,11 +42,11 @@ export default async function AdminBetsPage() {
       </div>
 
       <BetsAdminTable
-        bets={(bets ?? []) as Bet[]}
-        profiles={(profiles ?? []) as { id: string; display_name: string | null; email: string }[]}
-        matches={(matches ?? []) as Match[]}
-        teams={(teams ?? []) as Team[]}
-        annexCOptions={(annexC ?? []) as AnnexCOption[]}
+        bets={bets}
+        profiles={profiles}
+        matches={matches}
+        teams={teams}
+        annexCOptions={annexC}
       />
     </div>
   );

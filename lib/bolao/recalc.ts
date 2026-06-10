@@ -23,6 +23,7 @@ import {
   extractAdvancingTeams, buildPredictionCensus,
   calculateUserQualificationScores,
 } from './qualification';
+import { fetchAll } from '@/lib/supabase/fetchAll';
 import type {
   Bet, Match, Team, Settings, AnnexCOption, BracketOverride,
 } from '@/types/database';
@@ -95,25 +96,23 @@ export async function recalcMatchAndAllBets(matchId: number) {
 
 /** Otimizado: paraleliza updates e usa cache local. */
 async function recalcKnockoutMatchupsForAllUsers(sb: SB, cfg: Settings) {
-  const [
-    { data: profilesRaw }, { data: allBetsRaw },
-    { data: matchesRaw }, { data: teamsRaw },
-    { data: annexCRaw }, { data: overridesRaw },
-  ] = await Promise.all([
-    sb.from('profiles').select('id'),
-    sb.from('bets').select('*'),
-    sb.from('matches').select('*'),
-    sb.from('teams').select('*'),
-    sb.from('fifa_annex_c').select('*'),
-    sb.from('bracket_overrides').select('*'),
+  // v68 — PAGINAÇÃO obrigatória. PostgREST do Supabase default max-rows = 1000,
+  // o que tinha truncado as 1.556 bets em produção: usuários com bets nas
+  // linhas 1001-1556 não estavam tendo o cross-fase de KO recalculado.
+  const [profiles, allBets, allMatches, teams, annexC, overrides] = await Promise.all([
+    fetchAll<{ id: string }>((from, to) =>
+      sb.from('profiles').select('id').range(from, to)),
+    fetchAll<Bet>((from, to) =>
+      sb.from('bets').select('*').range(from, to)),
+    fetchAll<Match>((from, to) =>
+      sb.from('matches').select('*').range(from, to)),
+    fetchAll<Team>((from, to) =>
+      sb.from('teams').select('*').range(from, to)),
+    fetchAll<AnnexCOption>((from, to) =>
+      sb.from('fifa_annex_c').select('*').range(from, to)),
+    fetchAll<BracketOverride>((from, to) =>
+      sb.from('bracket_overrides').select('*').range(from, to)),
   ]);
-
-  const profiles = (profilesRaw ?? []) as { id: string }[];
-  const allMatches = (matchesRaw ?? []) as Match[];
-  const teams = (teamsRaw ?? []) as Team[];
-  const annexC = (annexCRaw ?? []) as AnnexCOption[];
-  const overrides = (overridesRaw ?? []) as BracketOverride[];
-  const allBets = (allBetsRaw ?? []) as Bet[];
 
   const betsByUser = new Map<string, Bet[]>();
   for (const b of allBets) {
@@ -226,24 +225,24 @@ export async function recalcBracket() {
 
 export async function recalcAllQualificationScores() {
   const sb = createServiceRoleClient();
-  const [
-    { data: settings }, { data: profilesRaw }, { data: allBetsRaw },
-    { data: matchesRaw }, { data: teamsRaw }, { data: annexCRaw },
-  ] = await Promise.all([
+  // v68 — PAGINAÇÃO obrigatória. Sem isso, com 1.556 bets em produção,
+  // ~36% das apostas ficavam fora do cálculo de UQS — usuários cujas bets
+  // caíam nas linhas 1001-1556 tinham pontuação por classificação ERRADA.
+  const [{ data: settings }, profiles, allBets, allMatches, teams, annexC] = await Promise.all([
     sb.from('settings').select('*').eq('id', 1).single(),
-    sb.from('profiles').select('id'),
-    sb.from('bets').select('*'),
-    sb.from('matches').select('*'),
-    sb.from('teams').select('*'),
-    sb.from('fifa_annex_c').select('*'),
+    fetchAll<{ id: string }>((from, to) =>
+      sb.from('profiles').select('id').range(from, to)),
+    fetchAll<Bet>((from, to) =>
+      sb.from('bets').select('*').range(from, to)),
+    fetchAll<Match>((from, to) =>
+      sb.from('matches').select('*').range(from, to)),
+    fetchAll<Team>((from, to) =>
+      sb.from('teams').select('*').range(from, to)),
+    fetchAll<AnnexCOption>((from, to) =>
+      sb.from('fifa_annex_c').select('*').range(from, to)),
   ]);
 
   const cfg: Settings = (settings ?? DEFAULT_SETTINGS) as Settings;
-  const profiles = (profilesRaw ?? []) as { id: string }[];
-  const allBets = (allBetsRaw ?? []) as Bet[];
-  const allMatches = (matchesRaw ?? []) as Match[];
-  const teams = (teamsRaw ?? []) as Team[];
-  const annexC = (annexCRaw ?? []) as AnnexCOption[];
 
   const real = extractAdvancingTeams(allMatches);
   const betsByUser = new Map<string, Bet[]>();
