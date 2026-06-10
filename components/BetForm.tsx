@@ -74,6 +74,33 @@ export function BetForm({ userId, matches, teams, existingBets, annexCOptions, s
    */
   const debounceTimersRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
 
+  /**
+   * v67 — CASCADE de snapshots: mapa do último snapshot conhecido por match
+   * (`bet_home_team_id` / `bet_away_team_id`) no banco.
+   *
+   * Por que: ao mudar um placar de fase de grupos, a árvore visual do usuário
+   * muda imediatamente em `resolvedMatches`, MAS o salvamento individual de
+   * `/api/bets/save` só persiste o match alterado. Os snapshots dos KO
+   * downstream ficam com os times antigos no banco — o que é exatamente o
+   * problema reportado: "comparativo não mostra todos os times".
+   *
+   * Solução: após cada `saveBet` bem-sucedido, comparar `resolvedMatches`
+   * com este ref e disparar `POST /api/bets/sync-team-snapshots` em batch
+   * para os KO downstream cujos snapshots ficaram defasados.
+   */
+  const knownSnapshotsRef = useRef<Map<number, { home: number | null; away: number | null }>>(
+    new Map(existingBets.map(b => [
+      b.match_id,
+      { home: b.bet_home_team_id ?? null, away: b.bet_away_team_id ?? null },
+    ])),
+  );
+
+  /**
+   * Debounce do cascade — agrega vários saves consecutivos numa única chamada
+   * de sync. Evita N requests quando o usuário muda rápido vários grupos.
+   */
+  const cascadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const teamById = useMemo(() => new Map(teams.map(t => [t.id, t])), [teams]);
 
   /** Matches da fase de GRUPOS com placar do palpite aplicado. */
@@ -165,6 +192,71 @@ export function BetForm({ userId, matches, teams, existingBets, annexCOptions, s
     return id ? teamById.get(id) ?? null : null;
   }
 
+  /**
+   * v67 — CASCADE de snapshots downstream.
+   *
+   * Compara cada match KO desta árvore visual atual (`resolvedMatches`)
+   * com o último snapshot conhecido no banco (`knownSnapshotsRef`). Se
+   * mudou (ex.: o usuário ajustou um placar de grupo e os classificados
+   * mudaram), enfileira um update.
+   *
+   * Só inclui matches em que o usuário JÁ tem aposta (existingBets) —
+   * snapshots de jogos não apostados não entram na cascata.
+   *
+   * Faz POST batch para `/api/bets/sync-team-snapshots`, que NÃO toca em
+   * placar/advancer/points. Se a sync chegar de volta com sucesso,
+   * atualiza `knownSnapshotsRef` com os novos valores.
+   */
+  const scheduleCascadeSync = useCallback(async () => {
+    if (isLocked) return;  // bloqueado: deixa quieto
+
+    // Bets KO existentes que o usuário tem
+    const userBetMatchIds = new Set(existingBets.map(b => b.match_id));
+
+    type Update = { match_id: number; bet_home_team_id: number | null; bet_away_team_id: number | null };
+    const updates: Update[] = [];
+
+    for (const m of resolvedMatches) {
+      if (m.group_code) continue;             // grupos têm slots fixos
+      if (!userBetMatchIds.has(m.id)) continue; // só sincroniza apostas existentes
+      const known = knownSnapshotsRef.current.get(m.id) ?? { home: null, away: null };
+      const currentHome = m.home_team_id ?? null;
+      const currentAway = m.away_team_id ?? null;
+      if (known.home !== currentHome || known.away !== currentAway) {
+        updates.push({
+          match_id: m.id,
+          bet_home_team_id: currentHome,
+          bet_away_team_id: currentAway,
+        });
+      }
+    }
+
+    if (updates.length === 0) return;
+
+    try {
+      const res = await fetch('/api/bets/sync-team-snapshots', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({ updates }),
+      });
+      const j = await res.json().catch(() => null);
+      if (res.ok && j?.success) {
+        // Sucesso parcial é OK — atualizamos os snapshots para o que ENVIAMOS.
+        // Race-safe: o BetForm é single-user, a chance de conflito é mínima,
+        // e mesmo que algo divirja, o próximo save corrige.
+        for (const u of updates) {
+          knownSnapshotsRef.current.set(u.match_id, {
+            home: u.bet_home_team_id,
+            away: u.bet_away_team_id,
+          });
+        }
+      }
+    } catch {
+      // Silencioso — o autosave normal continua tentando.
+    }
+  }, [isLocked, existingBets, resolvedMatches]);
+
   // ============================================================
   // SAVE — com race-guard por seqId e router.refresh() após sucesso
   // ============================================================
@@ -240,12 +332,26 @@ export function BetForm({ userId, matches, teams, existingBets, annexCOptions, s
       setSaveStatus(`❌ Erro: ${errorMsg}`);
     } else {
       setSaveStatus(`✓ Salvo às ${new Date().toLocaleTimeString('pt-BR')}`);
+
+      // Atualiza o known-snapshot para o match que acabou de ser salvo —
+      // o cascade abaixo vai comparar com este valor.
+      knownSnapshotsRef.current.set(matchId, { home: snapHome, away: snapAway });
+
+      // CASCADE — agenda sync dos snapshots downstream em background. O
+      // debounce de 600ms agrupa múltiplos saves consecutivos (ex.: o
+      // usuário ajustando vários jogos de grupo) num único POST.
+      if (cascadeTimerRef.current) clearTimeout(cascadeTimerRef.current);
+      cascadeTimerRef.current = setTimeout(() => {
+        cascadeTimerRef.current = null;
+        scheduleCascadeSync();
+      }, 600);
+
       // Invalida Router Cache: /apostas, /comparativo, /ranking etc voltam
       // a buscar dados frescos no servidor na próxima navegação/foco.
       try { router.refresh(); } catch { /* ignore */ }
     }
     void userId;
-  }, [userId, matches, isLocked, lock.message, router]);
+  }, [userId, matches, isLocked, lock.message, router, scheduleCascadeSync]);
 
   function scheduleSave(matchId: number, lb: LocalBet, delay: number) {
     const timers = debounceTimersRef.current;

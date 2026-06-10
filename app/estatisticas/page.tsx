@@ -16,6 +16,7 @@ import {
 import { DEFAULT_SETTINGS } from '@/lib/bolao/scoring';
 import { getGlobalLockStatus } from '@/lib/bolao/lockStatus';
 import { TeamNameWithFlag } from '@/components/TeamNameWithFlag';
+import { fetchAll } from '@/lib/supabase/fetchAll';
 
 // Página depende de `settings` (lock dinâmico baseado em now()) — não cachear.
 export const dynamic = 'force-dynamic';
@@ -78,17 +79,20 @@ export default async function EstatisticasPage() {
   // recorte do usuário logado (1 apostador) — RLS naturalmente já restringe via cliente autenticado.
   const canSeeAllBets = isAdmin || lock.locked;
 
-  // 2) bets — fonte depende de canSeeAllBets
+  // 2) bets — fonte depende de canSeeAllBets.
+  // PAGINAÇÃO: Supabase JS trunca em 1000 sem `range`. Com 1.5k+ bets em
+  // produção, a estatística agregada perdia ~30% das apostas → cards
+  // ficavam incompletos. v67 usa fetchAll para garantir todas as linhas.
   let bets: Bet[] = [];
   if (canSeeAllBets) {
     // Service role bypassa RLS — TODAS as apostas (defesa em profundidade: migration 005 também libera).
     const sb = createServiceRoleClient();
-    const { data: betsRaw } = await sb.from('bets').select('*');
-    bets = (betsRaw ?? []) as Bet[];
+    bets = await fetchAll<Bet>((from, to) =>
+      sb.from('bets').select('*').range(from, to));
   } else {
     // Usuário comum + apostas ABERTAS: cliente autenticado, RLS limita à própria aposta.
-    const { data: betsRaw } = await supabase.from('bets').select('*');
-    bets = (betsRaw ?? []) as Bet[];
+    bets = await fetchAll<Bet>((from, to) =>
+      supabase.from('bets').select('*').range(from, to));
   }
 
   const users = (usersRaw ?? []) as { id: string }[];

@@ -3,6 +3,7 @@ import type { Match, Team, Bet, AnnexCOption, Settings } from '@/types/database'
 import { MatchComparison } from '@/components/MatchComparison';
 import { getGlobalLockStatus } from '@/lib/bolao/lockStatus';
 import { pickInitialMatchId } from '@/lib/bolao/matchSchedule';
+import { fetchAll } from '@/lib/supabase/fetchAll';
 
 // Página dinâmica: sempre buscar bets/profiles frescos do Supabase ao montar.
 // Combinado com staleTimes.dynamic = 0 no next.config.js, garante que
@@ -60,12 +61,15 @@ export default async function ComparativoPage({ searchParams }: { searchParams: 
     const sb = createServiceRoleClient();
     // Profiles: só inclui email se admin; usuário comum vê apenas display_name.
     const profileCols = isAdmin ? 'id, display_name, email' : 'id, display_name';
-    const [{ data: betsRaw }, { data: profilesRaw }] = await Promise.all([
-      sb.from('bets').select('*'),
-      sb.from('profiles').select(profileCols),
+    // PAGINAÇÃO: cliente Supabase trunca em 1000 sem `range`. v66 corrigiu isso
+    // no backfill, mas a página em si continuava perdendo bets (>1.5k linhas).
+    const [betsAll, profilesAll] = await Promise.all([
+      fetchAll<Bet>((from, to) => sb.from('bets').select('*').range(from, to)),
+      fetchAll<unknown>((from, to) =>
+        sb.from('profiles').select(profileCols).range(from, to)),
     ]);
-    bets = (betsRaw ?? []) as Bet[];
-    profiles = (profilesRaw ?? []).map((p) => {
+    bets = betsAll;
+    profiles = profilesAll.map((p) => {
       // Cast via `unknown` é necessário porque o Supabase retorna `ParserError<...>`
       // quando o argumento de `.select()` é uma string dinâmica (profileCols ternário),
       // e o TS recusa o cast direto. `as unknown as <T>` é a forma canônica.
@@ -78,14 +82,18 @@ export default async function ComparativoPage({ searchParams }: { searchParams: 
     });
   } else {
     // Usuário comum e apostas ABERTAS: cliente autenticado, RLS limita à própria aposta.
-    const [{ data: betsRaw }, { data: profilesRaw }] = await Promise.all([
-      supabase.from('bets').select('*'),
-      supabase.from('profiles').select('id, display_name'),
+    // Mesmo com RLS, o volume final é pequeno (1 bet), mas mantemos paginação
+    // por consistência defensiva caso a regra mude no futuro.
+    const [betsAll, profilesAll] = await Promise.all([
+      fetchAll<Bet>((from, to) =>
+        supabase.from('bets').select('*').range(from, to)),
+      fetchAll<{ id: string; display_name: string | null }>((from, to) =>
+        supabase.from('profiles').select('id, display_name').range(from, to)),
     ]);
-    bets = (betsRaw ?? []) as Bet[];
-    profiles = (profilesRaw ?? []).map((p) => ({
-      id: (p as { id: string }).id,
-      display_name: (p as { display_name: string | null }).display_name,
+    bets = betsAll;
+    profiles = profilesAll.map(p => ({
+      id: p.id,
+      display_name: p.display_name,
       email: '',  // não expor email
     }));
   }
