@@ -219,16 +219,6 @@ export interface UserPrediction {
   byPhase: Record<QualificationPhase, Set<number>>;
 }
 
-/** Estrutura vazia (usada quando os grupos ainda não estão maduros). */
-function emptyPrediction(): UserPrediction {
-  return {
-    byPhase: {
-      group_stage: new Set(), r32: new Set(), r16: new Set(),
-      quarters: new Set(), semis: new Set(), third_place: new Set(),
-      runner_up: new Set(), champion: new Set(),
-    },
-  };
-}
 
 /**
  * Para um usuário e seus palpites, simula a árvore e extrai os times
