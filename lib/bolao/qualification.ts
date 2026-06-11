@@ -219,7 +219,6 @@ export interface UserPrediction {
   byPhase: Record<QualificationPhase, Set<number>>;
 }
 
-
 /**
  * Para um usuário e seus palpites, simula a árvore e extrai os times
  * que ELE acredita que vão a cada fase. Usada por `buildPredictionCensus`.
@@ -230,6 +229,17 @@ export interface UserPrediction {
  * extração não depende mais de `areAllGroupsMature` quando os snapshots
  * suprem os slots necessários. Bets sem snapshot caem na simulação
  * tradicional (compat com bets antigas pré-backfill).
+ *
+ * v69 — IMPORTANTE: `simulateBracket` re-resolve placeholders KO via
+ * standings (ignora `home_team_id` pré-populado quando o match tem
+ * `home_placeholder`). Isso fazia `byPhase.champion`/`runner_up`/`third_place`
+ * divergirem do que o usuário realmente apostou (visível no snapshot da bet)
+ * sempre que a simulação por palpites parciais resolvia diferente.
+ *
+ * Solução: APÓS o `extractAdvancingTeams`, sobrescrevemos esses 3 sets
+ * derivando-os DIRETO da bet do match correspondente (champion/runner_up
+ * = bet da final; third_place = bet da disputa de 3º). Snapshot da bet
+ * é a fonte de verdade dessas 3 fases — não a simulação.
  */
 export function extractUserPrediction(
   userBets: Bet[],
@@ -267,18 +277,83 @@ export function extractUserPrediction(
   // (que precisa de standings dos grupos) e chamamos `extractAdvancingTeams`
   // direto sobre `simMatches` — os slots que têm snapshot vão render times,
   // os que não têm vão render null e simplesmente não entram nas fases.
+  let byPhase: Record<QualificationPhase, Set<number>>;
   if (!areAllGroupsMature(simMatches)) {
-    return { byPhase: extractAdvancingTeams(simMatches, hints) };
+    byPhase = extractAdvancingTeams(simMatches, hints);
+  } else {
+    // Caminho completo: simula a árvore para preencher os slots que NÃO têm
+    // snapshot, usando standings + Anexo C + hints.
+    const standings = computeGroupStandings(teams, simMatches);
+    const thirds = computeThirdPlaceRanking(standings);
+    const key = sortedKeyOfQualifyingThirds(thirds);
+    const opt = key.length === 8 ? findAnnexCOption(key, annexCOptions) : null;
+    const resolved = simulateBracket(simMatches, teams, standings, thirds, opt, hints);
+    byPhase = extractAdvancingTeams(resolved, hints);
   }
 
-  // Caminho completo: simula a árvore para preencher os slots que NÃO têm
-  // snapshot, usando standings + Anexo C + hints.
-  const standings = computeGroupStandings(teams, simMatches);
-  const thirds = computeThirdPlaceRanking(standings);
-  const key = sortedKeyOfQualifyingThirds(thirds);
-  const opt = key.length === 8 ? findAnnexCOption(key, annexCOptions) : null;
-  const resolved = simulateBracket(simMatches, teams, standings, thirds, opt, hints);
-  return { byPhase: extractAdvancingTeams(resolved, hints) };
+  // v69 — Sobrescrita por SNAPSHOT da bet para 3 fases derivadas de UM
+  // jogo específico (sem cascata): champion, runner_up, third_place.
+  // Snapshot da bet é fonte de verdade — `simulateBracket` re-resolve
+  // placeholders e pode divergir.
+  overrideFromBet({
+    matchPhase: 'final',
+    targets: { winner: 'champion', loser: 'runner_up' },
+    allMatches, userBetsByMatch, byPhase,
+  });
+  overrideFromBet({
+    matchPhase: 'third_place',
+    targets: { winner: 'third_place' /* sem loser — vice de 3º não pontua */ },
+    allMatches, userBetsByMatch, byPhase,
+  });
+
+  return { byPhase };
+}
+
+/**
+ * v69 — Helper que sobrescreve um (ou dois) sets de `byPhase` derivando
+ * o vencedor (e opcionalmente o perdedor) DIRETAMENTE da bet do match
+ * indicado. A regra para decidir vencedor/perdedor:
+ *
+ *   1. Se `knockout_advancer === 'home'` → vencedor = home, perdedor = away.
+ *   2. Se `knockout_advancer === 'away'` → vencedor = away, perdedor = home.
+ *   3. Se `home_score > away_score`     → vencedor = home, perdedor = away.
+ *   4. Se `away_score > home_score`     → vencedor = away, perdedor = home.
+ *   5. Caso contrário (empate sem advancer): NÃO popula, NÃO inventa.
+ *
+ * Requer que `bet_home_team_id`/`bet_away_team_id` da bet estejam preenchidos.
+ * Se não estiverem, mantém o que veio do `extractAdvancingTeams`.
+ */
+function overrideFromBet(params: {
+  matchPhase: 'final' | 'third_place';
+  targets: { winner: QualificationPhase; loser?: QualificationPhase };
+  allMatches: Match[];
+  userBetsByMatch: Map<number, Bet>;
+  byPhase: Record<QualificationPhase, Set<number>>;
+}): void {
+  const m = params.allMatches.find(x => x.phase === params.matchPhase);
+  if (!m) return;
+  const bet = params.userBetsByMatch.get(m.id);
+  if (!bet) return;
+  const h = bet.bet_home_team_id ?? null;
+  const a = bet.bet_away_team_id ?? null;
+  if (h == null || a == null) return;  // sem snapshot completo, mantém
+
+  let winner: number | null = null;
+  let loser: number | null = null;
+  if (bet.knockout_advancer === 'home') { winner = h; loser = a; }
+  else if (bet.knockout_advancer === 'away') { winner = a; loser = h; }
+  else if (bet.home_score > bet.away_score) { winner = h; loser = a; }
+  else if (bet.away_score > bet.home_score) { winner = a; loser = h; }
+  // empate sem advancer: não há como decidir — mantém o que estava em byPhase.
+
+  if (winner != null) {
+    params.byPhase[params.targets.winner].clear();
+    params.byPhase[params.targets.winner].add(winner);
+  }
+  if (params.targets.loser && loser != null) {
+    params.byPhase[params.targets.loser].clear();
+    params.byPhase[params.targets.loser].add(loser);
+  }
 }
 
 /**
