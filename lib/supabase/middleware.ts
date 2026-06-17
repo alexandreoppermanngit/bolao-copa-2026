@@ -59,7 +59,9 @@ export async function updateSession(request: NextRequest) {
 
   // Rotas protegidas que exigem login
   const requiresLogin = !isPublic && (
-    path.startsWith('/apostas') || path.startsWith('/admin')
+    path.startsWith('/apostas') ||
+    path.startsWith('/meus-resultados') ||
+    path.startsWith('/admin')
   );
 
   // ---- 1) Não logado em rota protegida → redirect /login ----

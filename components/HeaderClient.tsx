@@ -19,6 +19,7 @@ import { createClient } from '@/lib/supabase/client';
 const NAV_LINKS = [
   { href: '/', label: 'Início' },
   { href: '/apostas', label: 'Minhas Apostas', loggedOnly: true },
+  { href: '/meus-resultados', label: 'Meus Resultados', loggedOnly: true },
   { href: '/ranking', label: 'Ranking' },
   { href: '/ranking-zebra', label: 'Ranking Zebra' },
   { href: '/comparativo', label: 'Comparativo' },
