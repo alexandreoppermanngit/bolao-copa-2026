@@ -23,11 +23,12 @@
 
 import type {
   Match, Team, Bet, AnnexCOption, Settings,
-  QualificationPhase,
+  QualificationPhase, GroupCode,
 } from '@/types/database';
 import {
   computeGroupStandings, computeThirdPlaceRanking,
   sortedKeyOfQualifyingThirds, areAllGroupsMature,
+  countPlayedGamesPerGroup,
 } from './standings';
 import {
   findAnnexCOption, simulateBracket,
@@ -94,6 +95,34 @@ function allGroupGamesPlayed(matches: Match[]): boolean {
   return group.every(m => m.home_score != null && m.away_score != null);
 }
 
+/**
+ * v72 — Cada grupo da Copa 2026 tem 4 times → 6 jogos (round-robin).
+ * Constante usada pelos gates de pontuação por classificação.
+ */
+export const GAMES_PER_GROUP = 6;
+
+/**
+ * v72 — Conjunto de grupos com TODOS os 6 jogos preenchidos (placar real).
+ * Usado para gatear quem é 1º/2º "oficial" antes de pontuar classificados.
+ */
+export function getCompletedGroups(matches: Match[]): Set<GroupCode> {
+  const counts = countPlayedGamesPerGroup(matches);
+  const done = new Set<GroupCode>();
+  for (const [g, n] of counts) {
+    if (n >= GAMES_PER_GROUP) done.add(g);
+  }
+  return done;
+}
+
+/**
+ * v72 — A primeira fase inteira foi concluída? Necessário para liberar
+ * pontuação por melhores terceiros (que só são definidos depois do
+ * último jogo da fase de grupos).
+ */
+export function isGroupStageFullyComplete(matches: Match[]): boolean {
+  return allGroupGamesPlayed(matches);
+}
+
 function allKoDecided(matches: Match[], phase: Match['phase']): boolean {
   const list = matches.filter(m => m.phase === phase);
   if (list.length === 0) return false;
@@ -155,6 +184,18 @@ export function calculateQualificationPoints(
 export function extractAdvancingTeams(
   matches: Match[],
   hintsByMatchId?: Map<number, KoTiebreakHint>,
+  opts?: {
+    /**
+     * v72 — quando true, aplica o "gate de pontuação":
+     *  - 1º e 2º colocados só entram se o GRUPO daquele time tiver 6/6 jogos.
+     *  - Melhores 3ºs só entram se TODOS os 12 grupos tiverem 6/6 jogos.
+     * Usado para a árvore REAL no `recalcAllQualificationScores`.
+     * Para a árvore PREVISTA do usuário, manter false (default).
+     * Exige `teams` para calcular standings.
+     */
+    gateGroupStage?: boolean;
+    teams?: Team[];
+  },
 ): Record<QualificationPhase, Set<number>> {
   const result: Record<QualificationPhase, Set<number>> = {
     group_stage: new Set(), r32: new Set(), r16: new Set(),
@@ -162,13 +203,33 @@ export function extractAdvancingTeams(
     runner_up: new Set(), champion: new Set(),
   };
 
-  // Times que avançam dos grupos = home/away dos jogos de R32 (assumindo já populado).
-  // Cada jogo de R32 tem 2 slots (1º vs 3º melhor, ou 1º vs 2º), totalizando 32 times:
-  // 12 primeiros + 12 segundos + 8 melhores terceiros.
-  for (const m of matches) {
-    if (m.phase === 'round_of_32') {
-      if (m.home_team_id) result.group_stage.add(m.home_team_id);
-      if (m.away_team_id) result.group_stage.add(m.away_team_id);
+  if (opts?.gateGroupStage && opts.teams) {
+    // ----- v72 gate: reconstruir result.group_stage a partir de standings.
+    // 1º e 2º só de grupos completos; 3ºs só se todos os grupos completos.
+    const standings = computeGroupStandings(opts.teams, matches);
+    const completed = getCompletedGroups(matches);
+    for (const g of completed) {
+      const std = standings.get(g);
+      if (!std) continue;
+      if (std[0]) result.group_stage.add(std[0].team_id);    // 1º
+      if (std[1]) result.group_stage.add(std[1].team_id);    // 2º
+    }
+    if (isGroupStageFullyComplete(matches)) {
+      // Melhores 3ºs entram só quando TODOS os grupos terminaram.
+      const thirds = computeThirdPlaceRanking(standings);
+      for (const t of thirds) {
+        if (t.rank <= 8) result.group_stage.add(t.team.team_id);
+      }
+    }
+  } else {
+    // Comportamento original (usado pela árvore PREVISTA do usuário):
+    // pega home/away dos R32 como antes. Pode ter 32 ids quando o bracket
+    // está populado (mesmo com grupos parciais — daí o gate para o REAL).
+    for (const m of matches) {
+      if (m.phase === 'round_of_32') {
+        if (m.home_team_id) result.group_stage.add(m.home_team_id);
+        if (m.away_team_id) result.group_stage.add(m.away_team_id);
+      }
     }
   }
 

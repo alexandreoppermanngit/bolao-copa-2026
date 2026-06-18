@@ -180,6 +180,7 @@ export default async function MeusResultadosPage({
       adminProfiles={adminProfiles}
       settings={settings}
       distByMatch={distByMatch}
+      allMatches={matches}
     />
   );
 }

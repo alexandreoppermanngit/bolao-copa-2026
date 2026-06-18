@@ -244,7 +244,15 @@ export async function recalcAllQualificationScores() {
 
   const cfg: Settings = (settings ?? DEFAULT_SETTINGS) as Settings;
 
-  const real = extractAdvancingTeams(allMatches);
+  // v72 — Aplica o GATE de pontuação por classificados (1º/2º só de grupos
+  // com 6 jogos completos; 3ºs só se todos os 12 grupos completos). Antes do
+  // gate, pontos por classificados entravam no ranking enquanto grupos ainda
+  // estavam parcialmente preenchidos, porque o R32 já era populado pelo
+  // recalcBracket com 2 jogos/grupo (areAllGroupsMature).
+  const real = extractAdvancingTeams(allMatches, undefined, {
+    gateGroupStage: true,
+    teams,
+  });
   const betsByUser = new Map<string, Bet[]>();
   for (const b of allBets) {
     if (!betsByUser.has(b.user_id)) betsByUser.set(b.user_id, []);

@@ -16,11 +16,14 @@
 import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import type {
-  Team, UserQualificationScore, QualificationPhase, Settings,
+  Team, UserQualificationScore, QualificationPhase, Settings, Match, GroupCode,
 } from '@/types/database';
 import type { BetAudit } from '@/lib/bolao/audit';
 import { AUDIT_REASON_LABEL } from '@/lib/bolao/audit';
-import { PHASE_DISPLAY_ORDER, isPhaseCompleted } from '@/lib/bolao/qualification';
+import {
+  PHASE_DISPLAY_ORDER, isPhaseCompleted,
+  getCompletedGroups, isGroupStageFullyComplete,
+} from '@/lib/bolao/qualification';
 import { outcomeOf, zebraMultiplier } from '@/lib/bolao/scoring';
 import { TeamNameWithFlag } from './TeamNameWithFlag';
 
@@ -100,6 +103,8 @@ interface Props {
   settings: Settings;
   /** v71 — distribuição de palpites por match (match_bet_distribution view). */
   distByMatch: Record<number, MatchBetDist>;
+  /** v72 — todos os matches (necessário para gates de classificação). */
+  allMatches: Match[];
 }
 
 const PHASE_LABEL: Record<QualificationPhase, string> = {
@@ -115,7 +120,7 @@ const PHASE_LABEL: Record<QualificationPhase, string> = {
 
 export function MyResultsView({
   isSelf, isAdmin, targetUserId, displayName, rank, audits, userQuals, teams, adminProfiles,
-  settings, distByMatch,
+  settings, distByMatch, allMatches,
 }: Props) {
   const router = useRouter();
   const teamById = useMemo(() => new Map(teams.map(t => [t.id, t])), [teams]);
@@ -164,21 +169,68 @@ export function MyResultsView({
   const totalAguardando = audits.filter(a => a.match.home_score == null).length;
 
   // ----- classificados (UQS) — ordenados por DISPLAY_ORDER, com fallback para fases concluídas -----
-  // Para o badge ✅/❌/⏳ replicamos a lógica do /admin/pontuacao: precisamos
-  // saber se a fase já foi concluída no resultado real. Como recebemos só
-  // os audits (que carregam matches), reconstruímos um array de matches
-  // únicos pra alimentar isPhaseCompleted.
-  const realMatches = useMemo(() => audits.map(a => a.match), [audits]);
+  // v72 — usa `allMatches` (todos os 104) em vez de só os do usuário, para
+  // os gates de classificação funcionarem corretamente (precisamos saber
+  // se cada grupo da Copa tem 6 jogos, não só os do usuário).
   const completedByPhase: Record<QualificationPhase, boolean> = useMemo(() => ({
-    group_stage: isPhaseCompleted('group_stage', realMatches),
-    r32:         isPhaseCompleted('r32', realMatches),
-    r16:         isPhaseCompleted('r16', realMatches),
-    quarters:    isPhaseCompleted('quarters', realMatches),
-    semis:       isPhaseCompleted('semis', realMatches),
-    third_place: isPhaseCompleted('third_place', realMatches),
-    runner_up:   isPhaseCompleted('runner_up', realMatches),
-    champion:    isPhaseCompleted('champion', realMatches),
-  }), [realMatches]);
+    group_stage: isPhaseCompleted('group_stage', allMatches),
+    r32:         isPhaseCompleted('r32', allMatches),
+    r16:         isPhaseCompleted('r16', allMatches),
+    quarters:    isPhaseCompleted('quarters', allMatches),
+    semis:       isPhaseCompleted('semis', allMatches),
+    third_place: isPhaseCompleted('third_place', allMatches),
+    runner_up:   isPhaseCompleted('runner_up', allMatches),
+    champion:    isPhaseCompleted('champion', allMatches),
+  }), [allMatches]);
+
+  // v72 — gates de classificação por grupo + grupo do team apostado.
+  // Para um team apostado em `group_stage`:
+  //   - Se time é 1º/2º do grupo: pendente até esse grupo ter 6 jogos.
+  //   - Se time é 3º: pendente até TODOS os grupos terem 6 jogos.
+  // Sem saber o rank antes do fim do grupo, usamos a regra mais segura:
+  //   - Pendente se o grupo do time ainda não terminou.
+  //   - Pendente se o grupo terminou mas a primeira fase inteira não (cobre
+  //     o caso do time poder vir como 3º melhor).
+  const completedGroups = useMemo(() => getCompletedGroups(allMatches), [allMatches]);
+  const groupStageFullyDone = useMemo(() => isGroupStageFullyComplete(allMatches), [allMatches]);
+  const teamGroup = useMemo(() => {
+    const map = new Map<number, GroupCode>();
+    for (const t of teams) map.set(t.id, t.group_code);
+    return map;
+  }, [teams]);
+
+  /**
+   * v72 — Status visual para uma linha de classificação por TEAM apostado.
+   * Devolve emoji + label legível para a UI.
+   *   - 'group_stage':
+   *     - is_correct === true → ✅ Acertou
+   *     - grupo do time ainda incompleto → ⏳ Aguardando definição do grupo
+   *     - grupo do time completo MAS fase de grupos ainda não toda → ⏳ Aguardando fim da 1ª fase
+   *       (necessário porque o team pode pontuar via 3º melhor — só definido no fim)
+   *     - fase totalmente completa → ❌ Errou
+   *   - outras fases: usa o tri-estado original via `completedByPhase`.
+   */
+  function classificationStatus(
+    phase: QualificationPhase,
+    teamId: number,
+    isCorrect: boolean,
+  ): { icon: string; label: string } {
+    if (isCorrect) return { icon: '✅', label: 'Acertou' };
+    if (phase === 'group_stage') {
+      const groupOfTeam = teamGroup.get(teamId);
+      const groupIsDone = groupOfTeam ? completedGroups.has(groupOfTeam) : false;
+      if (!groupIsDone) {
+        return { icon: '⏳', label: 'Aguardando definição do grupo' };
+      }
+      if (!groupStageFullyDone) {
+        return { icon: '⏳', label: 'Aguardando fim da 1ª fase' };
+      }
+      return { icon: '❌', label: 'Errou' };
+    }
+    return completedByPhase[phase]
+      ? { icon: '❌', label: 'Errou' }
+      : { icon: '⏳', label: 'Aguardando' };
+  }
 
   const sortedQuals = useMemo(() => {
     return [...userQuals].sort((a, b) =>
@@ -308,8 +360,10 @@ export function MyResultsView({
       <section className="bg-white rounded-xl shadow-sm p-4">
         <h2 className="text-lg font-bold mb-3">🏅 Classificados apostados</h2>
         <p className="text-xs text-gray-600 mb-3">
-          Seleções apostadas em cada fase. ✅ = acertou (fase concluída) ·
-          ❌ = errou (fase concluída) · ⏳ = aguardando resultado.
+          Seleções apostadas em cada fase. ✅ = acertou · ❌ = errou ·
+          ⏳ = aguardando definição. Para a fase de grupos: 1º/2º só pontuam
+          quando os 6 jogos do grupo estão completos; melhores 3ºs só
+          pontuam quando toda a primeira fase termina.
         </p>
         {sortedQuals.length === 0 && (
           <p className="text-sm text-gray-500">Nenhum classificado apostado ainda.</p>
@@ -331,14 +385,13 @@ export function MyResultsView({
                 {sortedQuals.map(q => {
                   const phase = q.phase as QualificationPhase;
                   const t = teamById.get(q.team_id);
-                  const status = q.is_correct
-                    ? '✅'
-                    : (completedByPhase[phase] ? '❌' : '⏳');
+                  // v72 — status granular: respeita gate por grupo
+                  const st = classificationStatus(phase, q.team_id, q.is_correct);
                   return (
                     <tr key={q.id}>
                       <td className="py-1">{PHASE_LABEL[phase]}</td>
                       <td>{t ? <TeamNameWithFlag team={t} size="sm" /> : `#${q.team_id}`}</td>
-                      <td className="text-center">{status}</td>
+                      <td className="text-center" title={st.label}>{st.icon}</td>
                       <td className="text-right">{q.points_base}</td>
                       {/* v71 — fator amigável em formato 1.27x (era .toFixed(3)) */}
                       <td className="text-right font-medium">{(1 + Number(q.factor)).toFixed(2)}×</td>
