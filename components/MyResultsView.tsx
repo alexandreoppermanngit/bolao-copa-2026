@@ -16,12 +16,56 @@
 import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import type {
-  Team, UserQualificationScore, QualificationPhase,
+  Team, UserQualificationScore, QualificationPhase, Settings,
 } from '@/types/database';
 import type { BetAudit } from '@/lib/bolao/audit';
 import { AUDIT_REASON_LABEL } from '@/lib/bolao/audit';
 import { PHASE_DISPLAY_ORDER, isPhaseCompleted } from '@/lib/bolao/qualification';
+import { outcomeOf, zebraMultiplier } from '@/lib/bolao/scoring';
 import { TeamNameWithFlag } from './TeamNameWithFlag';
+
+interface MatchBetDist {
+  pct_home: number;
+  pct_draw: number;
+  pct_away: number;
+  total: number;
+}
+
+/**
+ * Helper de timezone — retorna "YYYY-MM-DD" do AGORA em horário de
+ * Brasília (UTC-3 fixo, sem DST desde 2019). Independe do fuso do client.
+ *
+ * Usado para inicializar o filtro de dia em /meus-resultados:
+ *   - Se hoje (BRT) tem jogos, abre lá.
+ *   - Senão, próximo dia futuro com jogos.
+ *   - Senão, último dia com jogos.
+ */
+function getBrtTodayISO(): string {
+  const now = new Date();
+  // Pega tempo UTC e subtrai 3h para "tempo de Brasília visto em UTC".
+  // Daí usar getUTC* para extrair partes evita o fuso do client interferir.
+  const brt = new Date(now.getTime() - 3 * 60 * 60 * 1000);
+  const y = brt.getUTCFullYear();
+  const m = String(brt.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(brt.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+/**
+ * Decide qual dia abrir no filtro inicial.
+ *
+ * @param sortedDates lista de datas (YYYY-MM-DD) em ordem ASC com jogos
+ *                    do usuário-alvo.
+ * @param today       YYYY-MM-DD em BRT.
+ * @returns string da data escolhida ou 'all' se a lista estiver vazia.
+ */
+function pickInitialDay(sortedDates: string[], today: string): string {
+  if (sortedDates.length === 0) return 'all';
+  if (sortedDates.includes(today)) return today;
+  const next = sortedDates.find(d => d > today);
+  if (next) return next;
+  return sortedDates[sortedDates.length - 1];
+}
 
 interface RankRow {
   user_id: string;
@@ -52,6 +96,10 @@ interface Props {
   userQuals: UserQualificationScore[];
   teams: Team[];
   adminProfiles: AdminPickerProfile[];
+  /** v71 — settings para `zebraMultiplier` no cálculo do fator potencial. */
+  settings: Settings;
+  /** v71 — distribuição de palpites por match (match_bet_distribution view). */
+  distByMatch: Record<number, MatchBetDist>;
 }
 
 const PHASE_LABEL: Record<QualificationPhase, string> = {
@@ -67,6 +115,7 @@ const PHASE_LABEL: Record<QualificationPhase, string> = {
 
 export function MyResultsView({
   isSelf, isAdmin, targetUserId, displayName, rank, audits, userQuals, teams, adminProfiles,
+  settings, distByMatch,
 }: Props) {
   const router = useRouter();
   const teamById = useMemo(() => new Map(teams.map(t => [t.id, t])), [teams]);
@@ -81,7 +130,19 @@ export function MyResultsView({
       .sort((a, b) => a.date.localeCompare(b.date));
   }, [audits]);
 
-  const [dayFilter, setDayFilter] = useState<string>('all');
+  // v71 — Inicialização inteligente do filtro de dia:
+  //   1) Hoje (BRT) se houver jogos hoje;
+  //   2) Próximo dia futuro com jogos;
+  //   3) Último dia da lista;
+  //   4) 'all' se sem audits.
+  // A função `useState(() => init)` roda só uma vez (na primeira render),
+  // então não interfere com a escolha manual subsequente do usuário.
+  // Quando admin troca o jogador, há router.push() → componente remonta
+  // → essa init roda de novo com os audits do novo jogador.
+  const [dayFilter, setDayFilter] = useState<string>(() => {
+    const sortedDates = datesInfo.map(d => d.date);
+    return pickInitialDay(sortedDates, getBrtTodayISO());
+  });
 
   const filteredAudits: BetAudit[] = useMemo(() => {
     const list: BetAudit[] = dayFilter === 'all'
@@ -234,7 +295,12 @@ export function MyResultsView({
           </div>
         )}
         {filteredAudits.map(a => (
-          <BetCard key={a.bet.id} audit={a} />
+          <BetCard
+            key={a.bet.id}
+            audit={a}
+            settings={settings}
+            dist={distByMatch[a.match.id]}
+          />
         ))}
       </section>
 
@@ -274,7 +340,8 @@ export function MyResultsView({
                       <td>{t ? <TeamNameWithFlag team={t} size="sm" /> : `#${q.team_id}`}</td>
                       <td className="text-center">{status}</td>
                       <td className="text-right">{q.points_base}</td>
-                      <td className="text-right">{(1 + Number(q.factor)).toFixed(3)}×</td>
+                      {/* v71 — fator amigável em formato 1.27x (era .toFixed(3)) */}
+                      <td className="text-right font-medium">{(1 + Number(q.factor)).toFixed(2)}×</td>
                       <td className="text-right font-bold">{Number(q.points_final).toFixed(2)}</td>
                     </tr>
                   );
@@ -310,14 +377,102 @@ function CardMini({ label, value }: { label: string; value: number }) {
   );
 }
 
-function BetCard({ audit: a }: { audit: BetAudit }) {
+/**
+ * v71 — Decide se o palpite foi placar EXATO, considerando mando invertido.
+ *
+ * Requer que `audit.scoring_match` exista (ou seja, jogo pontuou contra algum
+ * confronto real — mesmo em outra fase). Compara `bet.home/away_score` com
+ * `scoring_match.home/away_score`, invertendo lados se `audit.inverted = true`.
+ *
+ * NÃO confundir com "vencedor certo" ou "saldo certo" — só vira true se os
+ * dois placares baterem exatamente (na orientação correta).
+ */
+function isExactScore(a: BetAudit): boolean {
+  const sm = a.scoring_match;
+  if (!sm) return false;
+  if (sm.home_score == null || sm.away_score == null) return false;
+  const bh = a.bet.home_score;
+  const ba = a.bet.away_score;
+  if (a.inverted) {
+    return bh === sm.away_score && ba === sm.home_score;
+  }
+  return bh === sm.home_score && ba === sm.away_score;
+}
+
+/**
+ * v71 — Multiplicador efetivo para um palpite em fase de grupos. Reflete
+ * o fator zebra que o recalc aplicou ao gravar `points_with_zebra`.
+ *
+ * Para KO o recalc grava `points_with_zebra = points` (sem zebra), então
+ * `multiplierForPointedBet` retorna 1.0 — caller ignora.
+ */
+function multiplierForPointedBet(a: BetAudit): number | null {
+  if (a.points <= 0) return null;
+  const m = Number(a.points_with_zebra) / Number(a.points);
+  if (!Number.isFinite(m) || m <= 0) return null;
+  return m;
+}
+
+/**
+ * v71 — Fator potencial para jogo SEM resultado real (fase de grupos).
+ * Calcula como se o outcome apostado pelo usuário fosse o vencedor:
+ *
+ *   pctHit = % das bets que apostaram nesse mesmo outcome
+ *   mult   = zebraMultiplier(pctHit, settings)
+ *
+ * Usa exatamente `zebraMultiplier` de `lib/bolao/scoring.ts` — mesma
+ * função que o recalc usa quando o resultado real chega. Sem regra nova.
+ *
+ * Retorna null para KO ou se distribuição vazia.
+ */
+function potentialMultiplier(
+  a: BetAudit,
+  settings: Settings,
+  dist: MatchBetDist | undefined,
+): number | null {
+  const isGroup =
+    a.match.phase === 'group_stage_1' ||
+    a.match.phase === 'group_stage_2' ||
+    a.match.phase === 'group_stage_3';
+  if (!isGroup) return null;
+  if (!dist || dist.total === 0) return null;
+  const out = outcomeOf(a.bet.home_score, a.bet.away_score);
+  const pct = out === 'home' ? dist.pct_home
+            : out === 'draw' ? dist.pct_draw
+            : dist.pct_away;
+  return zebraMultiplier(pct, settings);
+}
+
+function BetCard({
+  audit: a, settings, dist,
+}: {
+  audit: BetAudit;
+  settings: Settings;
+  dist: MatchBetDist | undefined;
+}) {
   const hasReal = a.match.home_score != null && a.match.away_score != null;
   const pointsZ = Number(a.points_with_zebra);
   const pointsBase = a.points;
   const hasPoints = pointsZ > 0;
 
+  const isGroup =
+    a.match.phase === 'group_stage_1' ||
+    a.match.phase === 'group_stage_2' ||
+    a.match.phase === 'group_stage_3';
+
+  // v71 — placar exato é o caso especial de destaque verde escuro.
+  const exact = isExactScore(a);
+
+  // v71 — fator/multiplicador exibido.
+  //   - Jogo pontuado (group): efetivo via points_with_zebra/points.
+  //   - Jogo futuro (group):   potencial via distribuição + zebraMultiplier.
+  //   - KO:                     null (sem fator de placar).
+  const multEffective = isGroup ? multiplierForPointedBet(a) : null;
+  const multPotential = !hasReal ? potentialMultiplier(a, settings, dist) : null;
+
   // Status visual
   const statusBadge = (() => {
+    if (exact) return { text: '🎯 Placar cheio', cls: 'bg-emerald-700 text-white' };
     if (!hasReal) return { text: 'Aguardando resultado', cls: 'bg-gray-100 text-gray-700' };
     if (hasPoints) return { text: 'Pontuou', cls: 'bg-green-100 text-green-800' };
     return { text: 'Não pontuou', cls: 'bg-red-50 text-red-700' };
@@ -330,8 +485,13 @@ function BetCard({ audit: a }: { audit: BetAudit }) {
   const dStr = `${a.match.match_date.slice(8, 10)}/${a.match.match_date.slice(5, 7)}`;
   const hStr = a.match.kickoff_brt.slice(0, 5);
 
+  // v71 — wrapper do card: verde escuro elegante quando placar exato.
+  const cardCls = exact
+    ? 'bg-emerald-50 border-2 border-emerald-700 rounded-xl shadow-sm overflow-hidden'
+    : 'bg-white rounded-xl shadow-sm overflow-hidden';
+
   return (
-    <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+    <div className={cardCls}>
       <div className="p-3 sm:p-4">
         <div className="flex items-center justify-between gap-2 text-xs text-gray-500 mb-2">
           <div className="flex items-center gap-2 flex-wrap">
@@ -354,7 +514,10 @@ function BetCard({ audit: a }: { audit: BetAudit }) {
               ? <TeamNameWithFlag team={a.bet_home_team} reverse maxChars={18} responsive />
               : <span className="italic text-gray-400 text-xs">aguardando…</span>}
           </div>
-          <div className="text-center font-mono font-bold text-lg">
+          <div className={
+            'text-center font-mono font-bold text-lg ' +
+            (exact ? 'text-emerald-800' : '')
+          }>
             {a.bet.home_score} × {a.bet.away_score}
           </div>
           <div className="truncate">
@@ -402,18 +565,39 @@ function BetCard({ audit: a }: { audit: BetAudit }) {
           </div>
         )}
 
-        {/* Pontos + motivo */}
+        {/* Pontos + motivo + fator (v71) */}
         <div className="mt-3 pt-2 border-t border-gray-100 flex items-center justify-between gap-3 text-xs flex-wrap">
           <div className={reasonText ? 'text-gray-600' : 'text-gray-400'}>
             {reasonText ?? ''}
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
             <span className="text-gray-500">
               Base: <strong className={pointsBase > 0 ? 'text-gray-800' : 'text-gray-400'}>{pointsBase}</strong>
             </span>
+            {/* Multiplicador efetivo (jogos pontuados de grupo) */}
+            {multEffective != null && (
+              <span className="text-gray-500" title="Fator zebra aplicado pelo recálculo">
+                Fator: <strong className="text-gray-800">{multEffective.toFixed(2)}×</strong>
+              </span>
+            )}
+            {/* Multiplicador potencial (jogos futuros de grupo) */}
+            {multPotential != null && multEffective == null && (
+              <span className="text-amber-700"
+                    title="Multiplicador se o resultado for o seu palpite (baseado na distribuição atual)">
+                Potencial: <strong>{multPotential.toFixed(2)}×</strong>
+              </span>
+            )}
+            {/* KO: sem fator de placar */}
+            {!isGroup && hasReal && (
+              <span className="text-gray-400 text-[11px]" title="Mata-mata: pontuação direta, sem multiplicador de jogo.">
+                Sem fator no mata-mata
+              </span>
+            )}
             <span className={
               `px-2 py-0.5 rounded font-bold ` +
-              (hasPoints ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-500')
+              (exact
+                ? 'bg-emerald-700 text-white'
+                : (hasPoints ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-500'))
             }>
               {pointsZ.toFixed(1)} pts
             </span>

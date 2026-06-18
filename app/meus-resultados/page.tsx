@@ -18,10 +18,31 @@ import { redirect } from 'next/navigation';
 import { createClient, requireAdmin } from '@/lib/supabase/server';
 import { fetchAll } from '@/lib/supabase/fetchAll';
 import { buildBetAudit, simulateBracketForUser, type BetAudit } from '@/lib/bolao/audit';
+import { DEFAULT_SETTINGS } from '@/lib/bolao/scoring';
 import { MyResultsView } from '@/components/MyResultsView';
 import type {
-  Bet, Match, Team, AnnexCOption, UserQualificationScore, QualificationPhase,
+  Bet, Match, Team, AnnexCOption, UserQualificationScore, QualificationPhase, Settings,
 } from '@/types/database';
+
+/**
+ * Linha de `public.match_bet_distribution` — view agregada que dá a
+ * distribuição de palpites por jogo. Usada para calcular o fator zebra
+ * POTENCIAL de jogos futuros (sem placar real ainda) — o usuário vê
+ * "quanto valeria a aposta se o resultado dele saísse hoje".
+ *
+ * Para jogos KO, o recalc não aplica fator zebra de placar, então o
+ * front também não exibe potencial em KO.
+ */
+interface MatchBetDistRow {
+  match_id: number;
+  total_bets: number;
+  home_wins: number;
+  draws: number;
+  away_wins: number;
+  pct_home: number;
+  pct_draw: number;
+  pct_away: number;
+}
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -71,6 +92,8 @@ export default async function MeusResultadosPage({
     rankRowsRaw,
     profileRaw,
     adminProfilesRaw,
+    { data: settingsRaw },
+    distRows,
   ] = await Promise.all([
     fetchAll<Match>((from, to) =>
       supabase.from('matches').select('*').order('id').range(from, to)),
@@ -91,7 +114,25 @@ export default async function MeusResultadosPage({
       ? fetchAll<AdminPickerProfile>((from, to) =>
           supabase.from('profiles').select('id, display_name').order('display_name').range(from, to))
       : Promise.resolve([] as AdminPickerProfile[]),
+    // v71 — settings (para zebraMultiplier) e distribuição de palpites
+    // (para fator potencial em jogos futuros). Settings é singleton row id=1.
+    supabase.from('settings').select('*').eq('id', 1).maybeSingle(),
+    fetchAll<MatchBetDistRow>((from, to) =>
+      supabase.from('match_bet_distribution').select('*').range(from, to)),
   ]);
+
+  const settings: Settings = (settingsRaw ?? DEFAULT_SETTINGS) as Settings;
+  // Map { match_id → { pct_home, pct_draw, pct_away } } para lookup O(1)
+  // no client. Total de bets do match também é útil para o tooltip.
+  const distByMatch: Record<number, { pct_home: number; pct_draw: number; pct_away: number; total: number }> = {};
+  for (const d of distRows) {
+    distByMatch[d.match_id] = {
+      pct_home: Number(d.pct_home),
+      pct_draw: Number(d.pct_draw),
+      pct_away: Number(d.pct_away),
+      total: d.total_bets,
+    };
+  }
 
   const rank = (rankRowsRaw[0] ?? null) as RankRow | null;
   const profile = (profileRaw.data ?? null) as { id: string; display_name: string | null } | null;
@@ -137,6 +178,8 @@ export default async function MeusResultadosPage({
       userQuals={userQuals as (UserQualificationScore & { phase: QualificationPhase })[]}
       teams={teams}
       adminProfiles={adminProfiles}
+      settings={settings}
+      distByMatch={distByMatch}
     />
   );
 }
