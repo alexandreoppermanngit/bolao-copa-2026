@@ -23,6 +23,7 @@ import { AUDIT_REASON_LABEL } from '@/lib/bolao/audit';
 import {
   PHASE_DISPLAY_ORDER, isPhaseCompleted,
   getCompletedGroups, isGroupStageFullyComplete,
+  phasePointsBase,
 } from '@/lib/bolao/qualification';
 import { outcomeOf, zebraMultiplier } from '@/lib/bolao/scoring';
 import { TeamNameWithFlag } from './TeamNameWithFlag';
@@ -239,6 +240,75 @@ export function MyResultsView({
     );
   }, [userQuals]);
 
+  // v73 — Agregação POTENCIAL por seleção apostada.
+  //
+  // Para cada (team_id) presente em user_qualification_scores deste usuário,
+  // calcula:
+  //   - sumMultiplier: Σ(1 + factor)        — quão "rara" é a aposta no acumulado
+  //   - sumPotential:  Σ pts_base × (1+factor) onde pts_base vem de SETTINGS
+  //     (não de q.points_base, que é zerado pelo gate v72 enquanto pendente)
+  //   - sumEarned:     Σ q.points_final     — o que já contou no ranking
+  //   - phases:        lista de fases apostadas com aquele time
+  //
+  // É só agregação de exibição — não altera ranking, recálculo, UQS ou
+  // qualquer regra. Cobre o caso de fases pendentes (mostra potencial
+  // antes de pontuar de fato).
+  const potentialBySelection = useMemo(() => {
+    const byTeam = new Map<number, {
+      teamId: number;
+      sumMultiplier: number;
+      sumPotential: number;
+      sumEarned: number;
+      phases: { phase: QualificationPhase; multiplier: number; potential: number; earned: number; isCorrect: boolean }[];
+    }>();
+
+    for (const q of userQuals) {
+      const phase = q.phase as QualificationPhase;
+      const factor = Number(q.factor);
+      const multiplier = 1 + factor;
+      // Base vem de SETTINGS (não de q.points_base, que respeita o gate v72).
+      // Isso é intencional — o potencial deve mostrar "se a fase liberar,
+      // quanto eu ganharia". Se usarmos q.points_base, o potencial fica 0
+      // enquanto pendente e perde sentido.
+      const basePts = phasePointsBase(phase, settings);
+      const potential = basePts * multiplier;
+      const earned = Number(q.points_final);
+
+      const entry = byTeam.get(q.team_id) ?? {
+        teamId: q.team_id,
+        sumMultiplier: 0,
+        sumPotential: 0,
+        sumEarned: 0,
+        phases: [],
+      };
+      entry.sumMultiplier += multiplier;
+      entry.sumPotential += potential;
+      entry.sumEarned += earned;
+      entry.phases.push({ phase, multiplier, potential, earned, isCorrect: q.is_correct });
+      byTeam.set(q.team_id, entry);
+    }
+
+    const rows = [...byTeam.values()]
+      .map(r => ({
+        ...r,
+        team: teamById.get(r.teamId) ?? null,
+        // ordena as fases internamente pelo DISPLAY_ORDER
+        phases: [...r.phases].sort((a, b) =>
+          PHASE_DISPLAY_ORDER.indexOf(a.phase) - PHASE_DISPLAY_ORDER.indexOf(b.phase)
+        ),
+      }))
+      // Ordenação principal: potencial desc → nº de fases desc → nome asc
+      .sort((a, b) => {
+        if (b.sumPotential !== a.sumPotential) return b.sumPotential - a.sumPotential;
+        if (b.phases.length !== a.phases.length) return b.phases.length - a.phases.length;
+        const na = a.team?.name ?? '';
+        const nb = b.team?.name ?? '';
+        return na.localeCompare(nb, 'pt-BR');
+      });
+
+    return rows;
+  }, [userQuals, teamById, settings]);
+
   // ----- helpers de format -----
   function dayLabel(dateISO: string): string {
     // YYYY-MM-DD → DD/MM/YYYY
@@ -404,11 +474,136 @@ export function MyResultsView({
           </div>
         )}
       </section>
+
+      {/* v73 — Seleções com maior potencial de pontos */}
+      {potentialBySelection.length > 0 && (
+        <section className="bg-white rounded-xl shadow-sm p-4">
+          <h2 className="text-lg font-bold mb-1">
+            🎯 Seleções com maior potencial de pontos
+          </h2>
+          <p className="text-xs text-gray-600 mb-3">
+            Somatório dos multiplicadores das seleções que você apostou nas
+            fases futuras. <strong>Potencial estimado — ainda não significa
+            ponto conquistado.</strong> Conforme cada fase libera (gate de
+            classificados), os pontos da coluna &ldquo;Já conquistado&rdquo;
+            preenchem naturalmente.
+          </p>
+          <div className="space-y-3">
+            {potentialBySelection.map((row, i) => (
+              <PotentialCard
+                key={row.teamId}
+                rank={i + 1}
+                team={row.team}
+                sumMultiplier={row.sumMultiplier}
+                sumPotential={row.sumPotential}
+                sumEarned={row.sumEarned}
+                phases={row.phases}
+              />
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   );
 }
 
 // ===== sub-components =====
+
+// v73 — Labels curtos por fase (usados nos chips de fases apostadas dentro
+// do PotentialCard). Diferente do PHASE_LABEL longo no header da tabela.
+const PHASE_SHORT: Record<QualificationPhase, string> = {
+  group_stage: 'Grupos',
+  r32: '16-avos',
+  r16: 'Oitavas',
+  quarters: 'Quartas',
+  semis: 'Semis',
+  third_place: '3º lugar',
+  runner_up: 'Vice',
+  champion: 'Campeão',
+};
+
+function PotentialCard({
+  rank, team, sumMultiplier, sumPotential, sumEarned, phases,
+}: {
+  rank: number;
+  team: Team | null;
+  sumMultiplier: number;
+  sumPotential: number;
+  sumEarned: number;
+  phases: { phase: QualificationPhase; multiplier: number; potential: number; earned: number; isCorrect: boolean }[];
+}) {
+  // Destaque sutil para a #1 (maior potencial). Demais ficam padrão.
+  const isTop = rank === 1;
+  const wrapperCls = isTop
+    ? 'border-2 border-accent-gold/60 bg-amber-50/40 rounded-lg p-3 sm:p-4'
+    : 'border border-gray-200 rounded-lg p-3 sm:p-4';
+
+  return (
+    <div className={wrapperCls}>
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          <span className="font-mono text-xs text-gray-500 w-6 text-right">#{rank}</span>
+          <div className="min-w-0">
+            {team
+              ? <TeamNameWithFlag team={team} size="md" maxChars={24} responsive />
+              : <span className="italic text-gray-400">Time ?</span>}
+          </div>
+        </div>
+        <div className="text-right shrink-0">
+          <div className="text-xs uppercase tracking-wide text-amber-700">Potencial</div>
+          <div className="text-2xl font-bold text-amber-700 leading-none">
+            {sumPotential.toFixed(1)}
+            <span className="text-sm ml-1 opacity-80">pts</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-3 text-xs">
+        <div className="bg-white border border-gray-100 rounded p-2">
+          <div className="text-[10px] uppercase tracking-wide text-gray-500">Multiplicador acum.</div>
+          <div className="text-base font-bold text-gray-800">{sumMultiplier.toFixed(2)}×</div>
+        </div>
+        <div className="bg-white border border-gray-100 rounded p-2">
+          <div className="text-[10px] uppercase tracking-wide text-gray-500">Já conquistado</div>
+          <div className={
+            'text-base font-bold ' +
+            (sumEarned > 0 ? 'text-emerald-700' : 'text-gray-400')
+          }>
+            {sumEarned.toFixed(1)} <span className="text-xs opacity-80">pts</span>
+          </div>
+        </div>
+        <div className="bg-white border border-gray-100 rounded p-2 col-span-2 sm:col-span-1">
+          <div className="text-[10px] uppercase tracking-wide text-gray-500">Fases apostadas</div>
+          <div className="text-base font-bold text-gray-800">{phases.length}</div>
+        </div>
+      </div>
+
+      {/* Chips das fases apostadas com multiplicador individual */}
+      <div className="mt-3 flex flex-wrap gap-1">
+        {phases.map(p => {
+          const earned = p.earned > 0;
+          const chipCls = earned
+            ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+            : 'bg-gray-100 text-gray-700 border border-gray-200';
+          return (
+            <span
+              key={p.phase}
+              className={`text-[11px] px-2 py-0.5 rounded ${chipCls}`}
+              title={
+                earned
+                  ? `Já pontuou: ${p.earned.toFixed(2)} pts · multiplicador ${p.multiplier.toFixed(2)}×`
+                  : `Potencial: ${p.potential.toFixed(2)} pts · multiplicador ${p.multiplier.toFixed(2)}×`
+              }
+            >
+              {PHASE_SHORT[p.phase]} · {p.multiplier.toFixed(2)}×
+            </span>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function Stat({ label, value, sub, highlight }: {
   label: string; value: string; sub?: string; highlight?: boolean;
 }) {
