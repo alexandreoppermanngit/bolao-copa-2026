@@ -283,6 +283,13 @@ export interface UserPrediction {
   byPhase: Record<QualificationPhase, Set<number>>;
 }
 
+// v76 — `emptyPrediction()` foi removida. Ela tinha sido criada para
+// devolver uma `UserPrediction` zerada quando os grupos do usuário não
+// estavam maduros, mas a v72 reescreveu `extractUserPrediction` para
+// chamar `extractAdvancingTeams(simMatches, hints)` diretamente nesse
+// caso — então a função ficou órfã e quebrava o lint
+// (@typescript-eslint/no-unused-vars).
+
 /**
  * Para um usuário e seus palpites, simula a árvore e extrai os times
  * que ELE acredita que vão a cada fase. Usada por `buildPredictionCensus`.
