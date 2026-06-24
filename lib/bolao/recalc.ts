@@ -181,7 +181,10 @@ export async function recalcBracket() {
   if (!teams || !matches || !annexCOpts) throw new Error('Falha ao carregar dados');
 
   const allMatches = matches as Match[];
-  const standings = computeGroupStandings(teams as Team[], allMatches);
+  // v75 — caminho REAL/oficial: aplica head-to-head no desempate de grupos.
+  // Simulações dos usuários (recalcKnockoutMatchupsForAllUsers /
+  // extractUserPrediction) continuam usando o modo 'simple' default.
+  const standings = computeGroupStandings(teams as Team[], allMatches, { tieBreakerMode: 'head_to_head' });
   const thirds = computeThirdPlaceRanking(standings);
   const key = sortedKeyOfQualifyingThirds(thirds);
   const annexC = findAnnexCOption(key, annexCOpts as AnnexCOption[]);

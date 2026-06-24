@@ -206,7 +206,10 @@ export function extractAdvancingTeams(
   if (opts?.gateGroupStage && opts.teams) {
     // ----- v72 gate: reconstruir result.group_stage a partir de standings.
     // 1º e 2º só de grupos completos; 3ºs só se todos os grupos completos.
-    const standings = computeGroupStandings(opts.teams, matches);
+    // v75 — Caminho REAL/oficial: usa head-to-head no desempate.
+    const standings = computeGroupStandings(opts.teams, matches, {
+      tieBreakerMode: 'head_to_head',
+    });
     const completed = getCompletedGroups(matches);
     for (const g of completed) {
       const std = standings.get(g);

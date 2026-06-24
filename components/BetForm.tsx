@@ -179,7 +179,13 @@ export function BetForm({ userId, matches, teams, existingBets, annexCOptions, s
     };
   }, [resolvedMatches, koHints, teamById]);
 
-  function teamForMatchSide(m: Match, side: 'home' | 'away'): Team | null {
+  /**
+   * v75 — Envelopado em useCallback para satisfazer o lint
+   * (react-hooks/exhaustive-deps no `saveBet`). Identidade estável entre
+   * renders que não tocam em `teamById`/`resolvedMatches` — comportamento
+   * do autosave e dos snapshots inalterado.
+   */
+  const teamForMatchSide = useCallback((m: Match, side: 'home' | 'away'): Team | null => {
     // Para grupos, usa o team_id original (já populado no DB)
     // Para KO, usa resolvedMatches (cascateado)
     if (m.group_code) {
@@ -190,7 +196,7 @@ export function BetForm({ userId, matches, teams, existingBets, annexCOptions, s
     if (!res) return null;
     const id = side === 'home' ? res.home_team_id : res.away_team_id;
     return id ? teamById.get(id) ?? null : null;
-  }
+  }, [teamById, resolvedMatches]);
 
   /**
    * v67 — CASCADE de snapshots downstream.
@@ -351,7 +357,7 @@ export function BetForm({ userId, matches, teams, existingBets, annexCOptions, s
       try { router.refresh(); } catch { /* ignore */ }
     }
     void userId;
-  }, [userId, matches, isLocked, lock.message, router, scheduleCascadeSync]);
+  }, [userId, matches, isLocked, lock.message, router, scheduleCascadeSync, teamForMatchSide]);
 
   function scheduleSave(matchId: number, lb: LocalBet, delay: number) {
     const timers = debounceTimersRef.current;

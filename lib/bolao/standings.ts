@@ -1,15 +1,31 @@
 /**
  * CLASSIFICAÇÃO DE GRUPOS + MELHORES 3ºs COLOCADOS
  *
- * Critérios de desempate (regulamento FIFA — replicado da planilha):
- *   1) Pontos
- *   2) Saldo de gols
- *   3) Gols pró
- *   4) Conduta (não automatizado)
- *   5) Ranking FIFA (não automatizado)
- *   → desempate final por ordem alfabética da seleção
+ * Critérios de desempate:
  *
- * REGRA DE MATURIDADE (nova):
+ *   Modo 'simple' (default — usado em simulações dos usuários):
+ *     1) Pontos
+ *     2) Saldo de gols
+ *     3) Gols pró
+ *     4) Ordem alfabética (estabilidade técnica)
+ *
+ *   Modo 'head_to_head' (v75 — usado nos caminhos REAIS/oficiais):
+ *     1) Pontos
+ *     2) CONFRONTO DIRETO entre os empatados (mini-tabela)
+ *     3) Saldo de gols (geral)
+ *     4) Gols pró (geral)
+ *     5) Ordem alfabética (estabilidade)
+ *
+ * Por que separar:
+ *   A interpretação dos PALPITES de cada usuário foi feita com a regra
+ *   antiga ('simple'). Mudar globalmente afetaria os classificados que o
+ *   usuário "viu" quando apostou — e os snapshots já gravados em
+ *   `bets.bet_home_team_id`/`bet_away_team_id`. A regra nova ('head_to_head')
+ *   vale APENAS para o cálculo OFICIAL (recalcBracket, classificados reais,
+ *   pontuação por classificados) — onde o que importa é refletir como o
+ *   ranking real da Copa funciona.
+ *
+ * REGRA DE MATURIDADE:
  *   Um grupo só é considerado "maduro" para alimentar o mata-mata quando
  *   tem pelo menos 2 jogos com placar preenchido. Enquanto isso, a chave
  *   eliminatória mostra placeholders ("aguardando definição").
@@ -24,11 +40,16 @@ export interface ComputedStanding extends GroupStanding {
 /** Mínimo de jogos preenchidos POR GRUPO para o grupo ser considerado "maduro". */
 export const MIN_GAMES_PER_GROUP_FOR_BRACKET = 2;
 
+/** v75 — modo de desempate. */
+export type TieBreakerMode = 'simple' | 'head_to_head';
+
 /** Computa classificação de cada grupo a partir dos jogos. */
 export function computeGroupStandings(
   teams: Team[],
   matches: Match[],
+  opts?: { tieBreakerMode?: TieBreakerMode },
 ): Map<GroupCode, ComputedStanding[]> {
+  const mode: TieBreakerMode = opts?.tieBreakerMode ?? 'simple';
   const result = new Map<GroupCode, ComputedStanding[]>();
   const groupCodes: GroupCode[] = ['A','B','C','D','E','F','G','H','I','J','K','L'];
 
@@ -66,16 +87,95 @@ export function computeGroupStandings(
     }
     for (const s of standings) s.goal_diff = s.goals_for - s.goals_against;
 
-    standings.sort((a, b) => (
-      b.points - a.points ||
-      b.goal_diff - a.goal_diff ||
-      b.goals_for - a.goals_for ||
-      a.team_name.localeCompare(b.team_name, 'pt-BR')
-    ));
+    if (mode === 'head_to_head') {
+      sortStandingsWithHeadToHead(standings, groupMatches);
+    } else {
+      standings.sort((a, b) => (
+        b.points - a.points ||
+        b.goal_diff - a.goal_diff ||
+        b.goals_for - a.goals_for ||
+        a.team_name.localeCompare(b.team_name, 'pt-BR')
+      ));
+    }
 
     result.set(gc, standings.map((s, i) => ({ ...s, rank: i + 1 })));
   }
   return result;
+}
+
+// ---------------------------------------------------------------------
+// v75 — Confronto direto (head-to-head) entre seleções empatadas em pontos
+// ---------------------------------------------------------------------
+
+type SimpleStanding = Omit<ComputedStanding, 'rank'>;
+
+/**
+ * Ordena standings respeitando confronto direto entre empatados em pontos.
+ *
+ * Pipeline:
+ *   1. Particiona em grupos de empatados por pontos.
+ *   2. Para cada grupo com >= 2 times, monta mini-tabela usando APENAS os
+ *      jogos entre os empatados (pontos H2H + saldo H2H + gols pró H2H).
+ *   3. Ordena cada partição pela mini-tabela. Empate persistente cai para
+ *      saldo geral → gols pró geral → nome (estável).
+ *   4. Concatena partições em ordem decrescente de pontos.
+ *
+ * Muta o array `standings` (mesma semântica do antigo `.sort()`).
+ */
+function sortStandingsWithHeadToHead(
+  standings: SimpleStanding[],
+  groupMatches: Match[],
+): void {
+  // Particiona por pontos
+  const byPoints = new Map<number, SimpleStanding[]>();
+  for (const s of standings) {
+    const arr = byPoints.get(s.points) ?? [];
+    arr.push(s);
+    byPoints.set(s.points, arr);
+  }
+  const pointGroups = [...byPoints.entries()].sort((a, b) => b[0] - a[0]);
+
+  // Para cada partição, ordena com fallback em cadeia
+  const ordered: SimpleStanding[] = [];
+  for (const [, part] of pointGroups) {
+    if (part.length === 1) {
+      ordered.push(part[0]);
+      continue;
+    }
+    // Mini-tabela de confronto direto: só jogos onde AMBOS os times são empatados
+    const ids = new Set(part.map(p => p.team_id));
+    const h2h = new Map<number, { pts: number; gd: number; gf: number }>();
+    for (const p of part) h2h.set(p.team_id, { pts: 0, gd: 0, gf: 0 });
+    for (const m of groupMatches) {
+      if (!ids.has(m.home_team_id!) || !ids.has(m.away_team_id!)) continue;
+      const h = h2h.get(m.home_team_id!)!;
+      const a = h2h.get(m.away_team_id!)!;
+      const hs = m.home_score!, as = m.away_score!;
+      h.gf += hs; h.gd += hs - as;
+      a.gf += as; a.gd += as - hs;
+      if (hs > as) h.pts += 3;
+      else if (hs < as) a.pts += 3;
+      else { h.pts += 1; a.pts += 1; }
+    }
+    part.sort((a, b) => {
+      const ha = h2h.get(a.team_id)!;
+      const hb = h2h.get(b.team_id)!;
+      // 1) pontos no H2H
+      if (hb.pts !== ha.pts) return hb.pts - ha.pts;
+      // 2) saldo no H2H
+      if (hb.gd !== ha.gd) return hb.gd - ha.gd;
+      // 3) gols pró no H2H
+      if (hb.gf !== ha.gf) return hb.gf - ha.gf;
+      // 4) Fallback geral: saldo, gols, nome (estabilidade)
+      if (b.goal_diff !== a.goal_diff) return b.goal_diff - a.goal_diff;
+      if (b.goals_for !== a.goals_for) return b.goals_for - a.goals_for;
+      return a.team_name.localeCompare(b.team_name, 'pt-BR');
+    });
+    ordered.push(...part);
+  }
+
+  // Substitui o conteúdo de `standings` mantendo a referência
+  for (let i = 0; i < standings.length; i++) standings[i] = ordered[i];
 }
 
 /**
