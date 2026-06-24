@@ -26,6 +26,7 @@ import {
   phasePointsBase,
 } from '@/lib/bolao/qualification';
 import { outcomeOf, zebraMultiplier } from '@/lib/bolao/scoring';
+import { getBrtTodayISO, pickInitialDayFromDates } from '@/lib/bolao/matchSchedule';
 import { TeamNameWithFlag } from './TeamNameWithFlag';
 
 interface MatchBetDist {
@@ -35,41 +36,8 @@ interface MatchBetDist {
   total: number;
 }
 
-/**
- * Helper de timezone — retorna "YYYY-MM-DD" do AGORA em horário de
- * Brasília (UTC-3 fixo, sem DST desde 2019). Independe do fuso do client.
- *
- * Usado para inicializar o filtro de dia em /meus-resultados:
- *   - Se hoje (BRT) tem jogos, abre lá.
- *   - Senão, próximo dia futuro com jogos.
- *   - Senão, último dia com jogos.
- */
-function getBrtTodayISO(): string {
-  const now = new Date();
-  // Pega tempo UTC e subtrai 3h para "tempo de Brasília visto em UTC".
-  // Daí usar getUTC* para extrair partes evita o fuso do client interferir.
-  const brt = new Date(now.getTime() - 3 * 60 * 60 * 1000);
-  const y = brt.getUTCFullYear();
-  const m = String(brt.getUTCMonth() + 1).padStart(2, '0');
-  const d = String(brt.getUTCDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
-
-/**
- * Decide qual dia abrir no filtro inicial.
- *
- * @param sortedDates lista de datas (YYYY-MM-DD) em ordem ASC com jogos
- *                    do usuário-alvo.
- * @param today       YYYY-MM-DD em BRT.
- * @returns string da data escolhida ou 'all' se a lista estiver vazia.
- */
-function pickInitialDay(sortedDates: string[], today: string): string {
-  if (sortedDates.length === 0) return 'all';
-  if (sortedDates.includes(today)) return today;
-  const next = sortedDates.find(d => d > today);
-  if (next) return next;
-  return sortedDates[sortedDates.length - 1];
-}
+// v74 — `getBrtTodayISO` e `pickInitialDayFromDates` agora vivem em
+// `lib/bolao/matchSchedule.ts` (reutilizados também por /admin/resultados).
 
 interface RankRow {
   user_id: string;
@@ -147,7 +115,7 @@ export function MyResultsView({
   // → essa init roda de novo com os audits do novo jogador.
   const [dayFilter, setDayFilter] = useState<string>(() => {
     const sortedDates = datesInfo.map(d => d.date);
-    return pickInitialDay(sortedDates, getBrtTodayISO());
+    return pickInitialDayFromDates(sortedDates, getBrtTodayISO());
   });
 
   const filteredAudits: BetAudit[] = useMemo(() => {

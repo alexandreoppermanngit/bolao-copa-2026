@@ -29,6 +29,45 @@ export function matchKickoffDate(
 }
 
 /**
+ * v74 — Retorna a data de HOJE em horário de Brasília (UTC-3 fixo desde
+ * 2019, sem DST), em formato `YYYY-MM-DD`. Independente do fuso do client:
+ * subtraímos 3h de UTC e extraímos partes via `getUTC*` — assim a string
+ * resultante representa o dia "civil" em São Paulo / Brasília.
+ *
+ * Usado por /meus-resultados (filtro inicial) e /admin/resultados (scroll
+ * automático para o dia atual). É o mesmo helper original da v71, agora
+ * exportado deste módulo (era inline no MyResultsView).
+ */
+export function getBrtTodayISO(): string {
+  const now = new Date();
+  const brt = new Date(now.getTime() - 3 * 60 * 60 * 1000);
+  const y = brt.getUTCFullYear();
+  const m = String(brt.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(brt.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+/**
+ * v74 — Dada uma lista de datas (YYYY-MM-DD) já ordenada ASC com jogos
+ * disponíveis e a data de hoje, escolhe qual dia priorizar:
+ *
+ *   1. Hoje, se houver jogos hoje.
+ *   2. Próximo dia futuro com jogos.
+ *   3. Último dia da lista (se tudo já passou).
+ *   4. 'all' se a lista vier vazia.
+ *
+ * Usado para inicializar filtros/scroll-anchors em /meus-resultados e
+ * /admin/resultados.
+ */
+export function pickInitialDayFromDates(sortedDates: string[], today: string): string {
+  if (sortedDates.length === 0) return 'all';
+  if (sortedDates.includes(today)) return today;
+  const next = sortedDates.find(d => d > today);
+  if (next) return next;
+  return sortedDates[sortedDates.length - 1];
+}
+
+/**
  * Decide qual jogo abrir por padrão em telas que precisam de um foco
  * automático (ex.: `/comparativo`). Em ordem de prioridade:
  *
