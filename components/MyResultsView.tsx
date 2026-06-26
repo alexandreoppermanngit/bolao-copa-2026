@@ -21,9 +21,17 @@ import type {
 import type { BetAudit } from '@/lib/bolao/audit';
 import { AUDIT_REASON_LABEL } from '@/lib/bolao/audit';
 import {
-  PHASE_DISPLAY_ORDER, isPhaseCompleted,
+  // v77 — `isPhaseCompleted` deixou de ser usado aqui; toda a lógica
+  // de "fase concluída / time eliminado" agora está em
+  // `evaluateTeamPhaseStatus`. Removido do import para evitar
+  // warning de no-unused-vars sem usar eslint-disable.
+  PHASE_DISPLAY_ORDER,
   getCompletedGroups, isGroupStageFullyComplete,
-  phasePointsBase,
+  phasePointsBase, evaluateTeamPhaseStatus,
+  type TeamPhaseStatus,
+  // v77e — extractAdvancingTeams para pré-computar `real` uma vez e
+  // passar para evaluateTeamPhaseStatus em todas as N chamadas internas.
+  extractAdvancingTeams,
 } from '@/lib/bolao/qualification';
 import { outcomeOf, zebraMultiplier } from '@/lib/bolao/scoring';
 import { getBrtTodayISO, pickInitialDayFromDates } from '@/lib/bolao/matchSchedule';
@@ -137,20 +145,12 @@ export function MyResultsView({
   const totalPontuadas = audits.filter(a => Number(a.points_with_zebra) > 0).length;
   const totalAguardando = audits.filter(a => a.match.home_score == null).length;
 
-  // ----- classificados (UQS) — ordenados por DISPLAY_ORDER, com fallback para fases concluídas -----
-  // v72 — usa `allMatches` (todos os 104) em vez de só os do usuário, para
-  // os gates de classificação funcionarem corretamente (precisamos saber
-  // se cada grupo da Copa tem 6 jogos, não só os do usuário).
-  const completedByPhase: Record<QualificationPhase, boolean> = useMemo(() => ({
-    group_stage: isPhaseCompleted('group_stage', allMatches),
-    r32:         isPhaseCompleted('r32', allMatches),
-    r16:         isPhaseCompleted('r16', allMatches),
-    quarters:    isPhaseCompleted('quarters', allMatches),
-    semis:       isPhaseCompleted('semis', allMatches),
-    third_place: isPhaseCompleted('third_place', allMatches),
-    runner_up:   isPhaseCompleted('runner_up', allMatches),
-    champion:    isPhaseCompleted('champion', allMatches),
-  }), [allMatches]);
+  // ----- classificados (UQS) — ordenados por DISPLAY_ORDER -----
+  // v77 — o antigo `completedByPhase` foi removido; toda a lógica de
+  // "fase concluída / time eliminado / pendente" agora vive dentro de
+  // `evaluateTeamPhaseStatus` (lib/bolao/qualification.ts), que já consome
+  // `allMatches` via `extractAdvancingTeams`. Mantido aqui só o cálculo
+  // de grupos completos que ainda é usado abaixo.
 
   // v72 — gates de classificação por grupo + grupo do team apostado.
   // Para um team apostado em `group_stage`:
@@ -168,37 +168,58 @@ export function MyResultsView({
     return map;
   }, [teams]);
 
+  // v77e — Pré-computa `real` (fonte da verdade gateada v72 + h2h v75)
+  // UMA VEZ por render e passa para todas as chamadas de
+  // `evaluateTeamPhaseStatus` (tabela + consolidado). Sem isso, cada chamada
+  // recomputava extractAdvancingTeams (com computeGroupStandings),
+  // multiplicando o custo por N rows × M renders.
+  const realAdvancing = useMemo(
+    () => extractAdvancingTeams(allMatches, undefined, { gateGroupStage: true, teams }),
+    [allMatches, teams],
+  );
+
   /**
-   * v72 — Status visual para uma linha de classificação por TEAM apostado.
-   * Devolve emoji + label legível para a UI.
-   *   - 'group_stage':
-   *     - is_correct === true → ✅ Acertou
-   *     - grupo do time ainda incompleto → ⏳ Aguardando definição do grupo
-   *     - grupo do time completo MAS fase de grupos ainda não toda → ⏳ Aguardando fim da 1ª fase
-   *       (necessário porque o team pode pontuar via 3º melhor — só definido no fim)
-   *     - fase totalmente completa → ❌ Errou
-   *   - outras fases: usa o tri-estado original via `completedByPhase`.
+   * v77 — Status granular para uma classificação apostada.
+   * Usa `evaluateTeamPhaseStatus` (que conhece grupos completos, 4º colocado,
+   * 3ºs aguardando, derrotas em KO etc.). Reflete na UI:
+   *   - 'reached'    → ✅ Acertou
+   *   - 'pending'    → ⏳ Aguardando (com label específico para group_stage)
+   *   - 'eliminated' → ❌ Eliminada (não vai pontuar)
    */
   function classificationStatus(
     phase: QualificationPhase,
     teamId: number,
     isCorrect: boolean,
-  ): { icon: string; label: string } {
-    if (isCorrect) return { icon: '✅', label: 'Acertou' };
+  ): { icon: string; label: string; status: TeamPhaseStatus } {
+    // Fast path: se UQS marcou correto, é reached.
+    if (isCorrect) return { icon: '✅', label: 'Acertou', status: 'reached' };
+
+    // v77e — passa `realAdvancing` pré-computado para evitar recomputar
+    // standings/extractAdvancingTeams em cada chamada.
+    const s = evaluateTeamPhaseStatus(teamId, phase, allMatches, teams, realAdvancing);
+    if (s === 'reached') return { icon: '✅', label: 'Acertou', status: 'reached' };
+    if (s === 'eliminated') {
+      // Label varia por contexto pra ficar mais informativo
+      if (phase === 'group_stage') {
+        // 4º colocado vs 3º não-classificado
+        const groupOfTeam = teamGroup.get(teamId);
+        const groupIsDone = groupOfTeam ? completedGroups.has(groupOfTeam) : false;
+        if (groupIsDone && groupStageFullyDone) {
+          return { icon: '❌', label: 'Eliminada (3º fora dos melhores)', status: 'eliminated' };
+        }
+        return { icon: '❌', label: 'Eliminada no grupo', status: 'eliminated' };
+      }
+      return { icon: '❌', label: 'Eliminada — não vai pontuar', status: 'eliminated' };
+    }
+    // pending
     if (phase === 'group_stage') {
       const groupOfTeam = teamGroup.get(teamId);
       const groupIsDone = groupOfTeam ? completedGroups.has(groupOfTeam) : false;
-      if (!groupIsDone) {
-        return { icon: '⏳', label: 'Aguardando definição do grupo' };
-      }
-      if (!groupStageFullyDone) {
-        return { icon: '⏳', label: 'Aguardando fim da 1ª fase' };
-      }
-      return { icon: '❌', label: 'Errou' };
+      if (!groupIsDone) return { icon: '⏳', label: 'Aguardando definição do grupo', status: 'pending' };
+      if (!groupStageFullyDone) return { icon: '⏳', label: 'Aguardando fim da 1ª fase', status: 'pending' };
+      return { icon: '⏳', label: 'Aguardando', status: 'pending' };
     }
-    return completedByPhase[phase]
-      ? { icon: '❌', label: 'Errou' }
-      : { icon: '⏳', label: 'Aguardando' };
+    return { icon: '⏳', label: 'Aguardando', status: 'pending' };
   }
 
   const sortedQuals = useMemo(() => {
@@ -208,51 +229,65 @@ export function MyResultsView({
     );
   }, [userQuals]);
 
-  // v73 — Agregação POTENCIAL por seleção apostada.
+  // v73 + v77 — Agregação por seleção apostada, com status por fase.
   //
-  // Para cada (team_id) presente em user_qualification_scores deste usuário,
-  // calcula:
-  //   - sumMultiplier: Σ(1 + factor)        — quão "rara" é a aposta no acumulado
-  //   - sumPotential:  Σ pts_base × (1+factor) onde pts_base vem de SETTINGS
-  //     (não de q.points_base, que é zerado pelo gate v72 enquanto pendente)
-  //   - sumEarned:     Σ q.points_final     — o que já contou no ranking
-  //   - phases:        lista de fases apostadas com aquele time
+  // Para cada team_id em UQS, calcula:
+  //   - sumMultiplier: Σ(1 + factor)  — raridade acumulada
+  //   - sumEarned:     Σ q.points_final  — pontos já conquistados (do banco)
+  //   - sumPotentialAlive:  Σ potential das fases REACHED/PENDING (futuras possíveis)
+  //   - sumPotentialLost:   Σ potential das fases ELIMINATED (não vão pontuar)
+  //   - sumPotentialTotal:  sumEarned + sumPotentialAlive
+  //                         (= o teto realista do que essa seleção ainda pode somar)
+  //   - phases: lista com phase + multiplier + potential + earned + status
   //
-  // É só agregação de exibição — não altera ranking, recálculo, UQS ou
-  // qualquer regra. Cobre o caso de fases pendentes (mostra potencial
-  // antes de pontuar de fato).
+  // Tudo só para exibição. Não toca em UQS/ranking/recálculo.
   const potentialBySelection = useMemo(() => {
     const byTeam = new Map<number, {
       teamId: number;
       sumMultiplier: number;
-      sumPotential: number;
       sumEarned: number;
-      phases: { phase: QualificationPhase; multiplier: number; potential: number; earned: number; isCorrect: boolean }[];
+      sumPotentialAlive: number;
+      sumPotentialLost: number;
+      phases: {
+        phase: QualificationPhase;
+        multiplier: number;
+        potential: number;
+        earned: number;
+        isCorrect: boolean;
+        status: TeamPhaseStatus;
+      }[];
     }>();
 
     for (const q of userQuals) {
       const phase = q.phase as QualificationPhase;
       const factor = Number(q.factor);
       const multiplier = 1 + factor;
-      // Base vem de SETTINGS (não de q.points_base, que respeita o gate v72).
-      // Isso é intencional — o potencial deve mostrar "se a fase liberar,
-      // quanto eu ganharia". Se usarmos q.points_base, o potencial fica 0
-      // enquanto pendente e perde sentido.
       const basePts = phasePointsBase(phase, settings);
       const potential = basePts * multiplier;
       const earned = Number(q.points_final);
+      // v77 + v77e — status real da seleção naquela fase
+      // (`realAdvancing` pré-computado para evitar N+1).
+      const status = q.is_correct
+        ? 'reached'
+        : evaluateTeamPhaseStatus(q.team_id, phase, allMatches, teams, realAdvancing);
 
       const entry = byTeam.get(q.team_id) ?? {
         teamId: q.team_id,
         sumMultiplier: 0,
-        sumPotential: 0,
         sumEarned: 0,
+        sumPotentialAlive: 0,
+        sumPotentialLost: 0,
         phases: [],
       };
       entry.sumMultiplier += multiplier;
-      entry.sumPotential += potential;
       entry.sumEarned += earned;
-      entry.phases.push({ phase, multiplier, potential, earned, isCorrect: q.is_correct });
+      if (status === 'eliminated') {
+        entry.sumPotentialLost += potential;
+      } else if (status === 'pending') {
+        entry.sumPotentialAlive += potential;
+      }
+      // status === 'reached' → o `earned` já cobre.
+      entry.phases.push({ phase, multiplier, potential, earned, isCorrect: q.is_correct, status });
       byTeam.set(q.team_id, entry);
     }
 
@@ -260,22 +295,33 @@ export function MyResultsView({
       .map(r => ({
         ...r,
         team: teamById.get(r.teamId) ?? null,
-        // ordena as fases internamente pelo DISPLAY_ORDER
         phases: [...r.phases].sort((a, b) =>
           PHASE_DISPLAY_ORDER.indexOf(a.phase) - PHASE_DISPLAY_ORDER.indexOf(b.phase)
         ),
       }))
-      // Ordenação principal: potencial desc → nº de fases desc → nome asc
+      // v77e — Ordenação por spec exato:
+      //   1) sortScore = alreadyWon + alivePotential  (desc)
+      //   2) alivePotential                            (desc)
+      //   3) alreadyWon                                (desc)
+      //   4) lostPotential                             (asc — menor perdido sobe)
+      //   5) nome da seleção                           (asc)
       .sort((a, b) => {
-        if (b.sumPotential !== a.sumPotential) return b.sumPotential - a.sumPotential;
-        if (b.phases.length !== a.phases.length) return b.phases.length - a.phases.length;
+        const aScore = a.sumEarned + a.sumPotentialAlive;
+        const bScore = b.sumEarned + b.sumPotentialAlive;
+        if (bScore !== aScore) return bScore - aScore;
+        if (b.sumPotentialAlive !== a.sumPotentialAlive)
+          return b.sumPotentialAlive - a.sumPotentialAlive;
+        if (b.sumEarned !== a.sumEarned)
+          return b.sumEarned - a.sumEarned;
+        if (a.sumPotentialLost !== b.sumPotentialLost)
+          return a.sumPotentialLost - b.sumPotentialLost;
         const na = a.team?.name ?? '';
         const nb = b.team?.name ?? '';
         return na.localeCompare(nb, 'pt-BR');
       });
 
     return rows;
-  }, [userQuals, teamById, settings]);
+  }, [userQuals, teamById, settings, allMatches, teams, realAdvancing]);
 
   // ----- helpers de format -----
   function dayLabel(dateISO: string): string {
@@ -398,10 +444,11 @@ export function MyResultsView({
       <section className="bg-white rounded-xl shadow-sm p-4">
         <h2 className="text-lg font-bold mb-3">🏅 Classificados apostados</h2>
         <p className="text-xs text-gray-600 mb-3">
-          Seleções apostadas em cada fase. ✅ = acertou · ❌ = errou ·
-          ⏳ = aguardando definição. Para a fase de grupos: 1º/2º só pontuam
-          quando os 6 jogos do grupo estão completos; melhores 3ºs só
-          pontuam quando toda a primeira fase termina.
+          Seleções apostadas em cada fase. ✅ = acertou · ❌ = eliminada
+          (não vai pontuar) · ⏳ = aguardando definição. Para a fase de
+          grupos: 1º/2º só pontuam quando os 6 jogos do grupo estão completos;
+          melhores 3ºs só pontuam quando toda a primeira fase termina.
+          Linhas em vermelho mostram o potencial que foi perdido.
         </p>
         {sortedQuals.length === 0 && (
           <p className="text-sm text-gray-500">Nenhum classificado apostado ainda.</p>
@@ -423,17 +470,45 @@ export function MyResultsView({
                 {sortedQuals.map(q => {
                   const phase = q.phase as QualificationPhase;
                   const t = teamById.get(q.team_id);
-                  // v72 — status granular: respeita gate por grupo
+                  // v77 — status granular: respeita gate por grupo + eliminação
                   const st = classificationStatus(phase, q.team_id, q.is_correct);
+                  // v77 — destaque vermelho discreto para eliminadas
+                  const rowCls = st.status === 'eliminated' ? 'bg-red-50/60' : '';
+                  // v77 — potencial PERDIDO (só faz sentido se eliminated)
+                  const lostPotential = st.status === 'eliminated'
+                    ? phasePointsBase(phase, settings) * (1 + Number(q.factor))
+                    : 0;
                   return (
-                    <tr key={q.id}>
+                    <tr key={q.id} className={rowCls}>
                       <td className="py-1">{PHASE_LABEL[phase]}</td>
                       <td>{t ? <TeamNameWithFlag team={t} size="sm" /> : `#${q.team_id}`}</td>
                       <td className="text-center" title={st.label}>{st.icon}</td>
                       <td className="text-right">{q.points_base}</td>
                       {/* v71 — fator amigável em formato 1.27x (era .toFixed(3)) */}
                       <td className="text-right font-medium">{(1 + Number(q.factor)).toFixed(2)}×</td>
-                      <td className="text-right font-bold">{Number(q.points_final).toFixed(2)}</td>
+                      {/* v77c — NUNCA exibir número negativo.
+                          Eliminada: "Pts Finais = 0" (vermelho) + sub-texto
+                          positivo "pot. perdido: X.X pts" (também vermelho,
+                          menor). Tooltip mantém a info completa. */}
+                      <td className={
+                        'text-right ' +
+                        (st.status === 'eliminated' ? 'text-red-700' : 'font-bold')
+                      } title={
+                        st.status === 'eliminated'
+                          ? `Potencial perdido: ${lostPotential.toFixed(1)} pts (não vai pontuar)`
+                          : undefined
+                      }>
+                        {st.status === 'eliminated' ? (
+                          <>
+                            <div className="font-bold">0</div>
+                            <div className="text-[10px] font-normal opacity-90">
+                              pot. perdido: {lostPotential.toFixed(1)} pts
+                            </div>
+                          </>
+                        ) : (
+                          Number(q.points_final).toFixed(2)
+                        )}
+                      </td>
                     </tr>
                   );
                 })}
@@ -450,11 +525,11 @@ export function MyResultsView({
             🎯 Seleções com maior potencial de pontos
           </h2>
           <p className="text-xs text-gray-600 mb-3">
-            Somatório dos multiplicadores das seleções que você apostou nas
-            fases futuras. <strong>Potencial estimado — ainda não significa
-            ponto conquistado.</strong> Conforme cada fase libera (gate de
-            classificados), os pontos da coluna &ldquo;Já conquistado&rdquo;
-            preenchem naturalmente.
+            Para cada seleção apostada: <strong>potencial vivo</strong> (fases
+            que ainda podem render pontos) + <strong>já conquistado</strong>
+            (pontos efetivos) + <strong>potencial perdido</strong> (fases em
+            que a seleção já foi eliminada — não vão pontuar). Ordenado pela
+            soma &quot;vivo + já conquistado&quot; desc.
           </p>
           <div className="space-y-3">
             {potentialBySelection.map((row, i) => (
@@ -463,7 +538,8 @@ export function MyResultsView({
                 rank={i + 1}
                 team={row.team}
                 sumMultiplier={row.sumMultiplier}
-                sumPotential={row.sumPotential}
+                sumPotentialAlive={row.sumPotentialAlive}
+                sumPotentialLost={row.sumPotentialLost}
                 sumEarned={row.sumEarned}
                 phases={row.phases}
               />
@@ -491,21 +567,35 @@ const PHASE_SHORT: Record<QualificationPhase, string> = {
 };
 
 function PotentialCard({
-  rank, team, sumMultiplier, sumPotential, sumEarned, phases,
+  rank, team, sumMultiplier, sumPotentialAlive, sumPotentialLost, sumEarned, phases,
 }: {
   rank: number;
   team: Team | null;
   sumMultiplier: number;
-  sumPotential: number;
+  sumPotentialAlive: number;
+  sumPotentialLost: number;
   sumEarned: number;
-  phases: { phase: QualificationPhase; multiplier: number; potential: number; earned: number; isCorrect: boolean }[];
+  phases: {
+    phase: QualificationPhase;
+    multiplier: number;
+    potential: number;
+    earned: number;
+    isCorrect: boolean;
+    status: TeamPhaseStatus;
+  }[];
 }) {
-  // Destaque sutil para a #1 (maior potencial). Demais ficam padrão.
-  const isTop = rank === 1;
-  const wrapperCls = isTop
-    ? 'border-2 border-accent-gold/60 bg-amber-50/40 rounded-lg p-3 sm:p-4'
-    : 'border border-gray-200 rounded-lg p-3 sm:p-4';
+  // v77 — Cor do header reflete o "estado dominante" do time: se já tem
+  // muito conquistado, dourado; se está todo eliminado, vermelho discreto;
+  // senão âmbar (padrão).
+  const allEliminated = phases.length > 0 && phases.every(p => p.status === 'eliminated');
+  const isTop = rank === 1 && !allEliminated;
+  const wrapperCls = allEliminated
+    ? 'border border-red-200 bg-red-50/40 rounded-lg p-3 sm:p-4'
+    : (isTop
+        ? 'border-2 border-accent-gold/60 bg-amber-50/40 rounded-lg p-3 sm:p-4'
+        : 'border border-gray-200 rounded-lg p-3 sm:p-4');
 
+  // Headline number: potencial vivo (o que ainda pode somar)
   return (
     <div className={wrapperCls}>
       <div className="flex items-start justify-between gap-3 flex-wrap">
@@ -518,17 +608,25 @@ function PotentialCard({
           </div>
         </div>
         <div className="text-right shrink-0">
-          <div className="text-xs uppercase tracking-wide text-amber-700">Potencial</div>
-          <div className="text-2xl font-bold text-amber-700 leading-none">
-            {sumPotential.toFixed(1)}
-            <span className="text-sm ml-1 opacity-80">pts</span>
+          <div className={
+            'text-xs uppercase tracking-wide ' +
+            (allEliminated ? 'text-red-700' : 'text-amber-700')
+          }>
+            {allEliminated ? 'Eliminada' : 'Potencial vivo'}
+          </div>
+          <div className={
+            'text-2xl font-bold leading-none ' +
+            (allEliminated ? 'text-red-700' : 'text-amber-700')
+          }>
+            {allEliminated ? '—' : sumPotentialAlive.toFixed(1)}
+            {!allEliminated && <span className="text-sm ml-1 opacity-80">pts</span>}
           </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-3 text-xs">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-3 text-xs">
         <div className="bg-white border border-gray-100 rounded p-2">
-          <div className="text-[10px] uppercase tracking-wide text-gray-500">Multiplicador acum.</div>
+          <div className="text-[10px] uppercase tracking-wide text-gray-500">Mult. acum.</div>
           <div className="text-base font-bold text-gray-800">{sumMultiplier.toFixed(2)}×</div>
         </div>
         <div className="bg-white border border-gray-100 rounded p-2">
@@ -537,33 +635,73 @@ function PotentialCard({
             'text-base font-bold ' +
             (sumEarned > 0 ? 'text-emerald-700' : 'text-gray-400')
           }>
-            {sumEarned.toFixed(1)} <span className="text-xs opacity-80">pts</span>
+            {sumEarned.toFixed(1)}<span className="text-xs opacity-80 ml-1">pts</span>
           </div>
         </div>
-        <div className="bg-white border border-gray-100 rounded p-2 col-span-2 sm:col-span-1">
-          <div className="text-[10px] uppercase tracking-wide text-gray-500">Fases apostadas</div>
-          <div className="text-base font-bold text-gray-800">{phases.length}</div>
+        <div className="bg-white border border-gray-100 rounded p-2">
+          <div className="text-[10px] uppercase tracking-wide text-gray-500">Potencial vivo</div>
+          <div className={
+            'text-base font-bold ' +
+            (sumPotentialAlive > 0 ? 'text-amber-700' : 'text-gray-400')
+          }>
+            {sumPotentialAlive.toFixed(1)}<span className="text-xs opacity-80 ml-1">pts</span>
+          </div>
+        </div>
+        <div className="bg-white border border-gray-100 rounded p-2">
+          <div className="text-[10px] uppercase tracking-wide text-gray-500">Pot. perdido</div>
+          {/* v77c — NUNCA negativo. Mesmo perdido, o número é positivo;
+              só a cor (vermelha) e o label "perdido" comunicam o sentido. */}
+          <div
+            className={
+              'text-base font-bold ' +
+              (sumPotentialLost > 0 ? 'text-red-700' : 'text-gray-400')
+            }
+            title={
+              sumPotentialLost > 0
+                ? `Potencial perdido nesta seleção: ${sumPotentialLost.toFixed(1)} pts (fases já impossíveis de pontuar)`
+                : undefined
+            }
+          >
+            {sumPotentialLost.toFixed(1)}
+            <span className="text-xs opacity-80 ml-1">pts</span>
+          </div>
         </div>
       </div>
 
-      {/* Chips das fases apostadas com multiplicador individual */}
+      {/* v77e — Chips por fase apostada: ícone + nome curto + pts (positivo).
+          - reached    → ✅ Grupos · 12.0 pts        (verde)
+          - pending    → ⏳ Quartas · pot. 8.5 pts   (cinza)
+          - eliminated → ❌ Campeão · perdido 5.0 pts (vermelho, tachado)
+          Tooltip mantém o multiplicador para quem quiser detalhes. */}
       <div className="mt-3 flex flex-wrap gap-1">
         {phases.map(p => {
-          const earned = p.earned > 0;
-          const chipCls = earned
-            ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
-            : 'bg-gray-100 text-gray-700 border border-gray-200';
+          let chipCls: string;
+          let icon: string;
+          let label: string;
+          let title: string;
+          if (p.status === 'reached') {
+            chipCls = 'bg-emerald-100 text-emerald-800 border border-emerald-200';
+            icon = '✅';
+            label = `${p.earned.toFixed(1)} pts`;
+            title = `Acertou: ${p.earned.toFixed(2)} pts · multiplicador ${p.multiplier.toFixed(2)}×`;
+          } else if (p.status === 'eliminated') {
+            chipCls = 'bg-red-100 text-red-800 border border-red-200 line-through opacity-90';
+            icon = '❌';
+            label = `perdido ${p.potential.toFixed(1)} pts`;
+            title = `Eliminada — potencial perdido: ${p.potential.toFixed(2)} pts · multiplicador ${p.multiplier.toFixed(2)}×`;
+          } else {
+            chipCls = 'bg-gray-100 text-gray-700 border border-gray-200';
+            icon = '⏳';
+            label = `pot. ${p.potential.toFixed(1)} pts`;
+            title = `Pendente — potencial: ${p.potential.toFixed(2)} pts · multiplicador ${p.multiplier.toFixed(2)}×`;
+          }
           return (
             <span
               key={p.phase}
               className={`text-[11px] px-2 py-0.5 rounded ${chipCls}`}
-              title={
-                earned
-                  ? `Já pontuou: ${p.earned.toFixed(2)} pts · multiplicador ${p.multiplier.toFixed(2)}×`
-                  : `Potencial: ${p.potential.toFixed(2)} pts · multiplicador ${p.multiplier.toFixed(2)}×`
-              }
+              title={title}
             >
-              {PHASE_SHORT[p.phase]} · {p.multiplier.toFixed(2)}×
+              {icon} {PHASE_SHORT[p.phase]} · {label}
             </span>
           );
         })}

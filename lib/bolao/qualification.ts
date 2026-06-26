@@ -123,6 +123,263 @@ export function isGroupStageFullyComplete(matches: Match[]): boolean {
   return allGroupGamesPlayed(matches);
 }
 
+// v77 — Status de uma seleção em relação a uma fase de classificação.
+export type TeamPhaseStatus = 'reached' | 'pending' | 'eliminated';
+
+/**
+ * v77 — Avalia o status visual de um team em uma fase de classificação,
+ * a partir do estado REAL dos matches/standings. Devolve:
+ *   - 'reached'    — team já alcançou essa fase (acerto se o usuário apostou).
+ *   - 'pending'    — ainda dá pra acontecer (fase real não decidiu o time).
+ *   - 'eliminated' — team já não pode mais alcançar essa fase.
+ *
+ * Usado APENAS para exibição em /meus-resultados (visualização granular
+ * de "✅ acertou" / "⏳ aguardando" / "❌ eliminada"). NÃO afeta cálculo,
+ * UQS ou ranking — todo o backend continua usando `extractAdvancingTeams`
+ * + `calculateUserQualificationScores` como antes.
+ *
+ * Regras (v77c — alinhadas ao spec):
+ *
+ *   group_stage:
+ *     - grupo do team incompleto                   → pending
+ *     - grupo completo + pos 1/2                   → reached (já está em real)
+ *     - grupo completo + pos 4                     → eliminated
+ *     - grupo completo + pos 3 + fase ainda parcial → pending (aguardando 3ºs)
+ *     - grupo completo + pos 3 + fase toda completa:
+ *         - top-8 melhores 3ºs                     → reached
+ *         - fora do top-8                          → eliminated
+ *
+ *   Exclusões mútuas via final/3º (v77c):
+ *     - 'runner_up' + team é campeão (venceu a final) → eliminated
+ *     - 'champion'  + team é vice (perdeu a final)    → eliminated
+ *     - 'third_place' + team é finalista (real.semis) → eliminated
+ *
+ *   Propagação de eliminação de grupos (v77e):
+ *     - Se groupStatus = 'eliminated' (4º colocado OU 3º fora dos melhores
+ *       após 1ª fase completa), QUALQUER phase KO retorna 'eliminated'.
+ *       O time não tem caminho para nenhum KO.
+ *
+ *   KO (r32, r16, quarters, semis, third_place, runner_up, champion):
+ *     - team em real[phase]                       → reached
+ *     - walk-forward (v77c+v77d): só dispara quando a fase PRÉ-REQUISITO
+ *       está TOTALMENTE decidida (= o bracket atual é definitivo, não
+ *       provisório). Se todas as partidas da fase decidida têm home/away
+ *       preenchidos e o team não é participante de nenhuma → eliminated.
+ *       Exemplo do que isso EVITA: BEL em 3º com grupo aberto sendo
+ *       cravada como ❌ em r32 porque o bracket provisório não a inclui
+ *       (ela ainda pode subir como melhor 3º quando a fase fechar).
+ *     - team perdeu em KO match cuja fase elimina  → eliminated
+ *     - caso contrário                             → pending
+ *
+ *   Casos especiais por phase:
+ *     - 'champion'   : qualquer derrota em KO elimina.
+ *     - 'runner_up'  : derrota antes da final elimina; perder a final é
+ *                       reached (capturado pelo fast path); vencer a final
+ *                       é eliminated (exclusão mútua acima).
+ *     - 'third_place': derrota em R32/R16/QF/3º place elimina; derrota em
+ *                       SF é OK (é como o time chega ao jogo de 3º).
+ *     - r32/r16/quarters/semis: derrota numa fase ≤ a apostada elimina.
+ */
+export function evaluateTeamPhaseStatus(
+  teamId: number,
+  phase: QualificationPhase,
+  matches: Match[],
+  teams: Team[],
+  /**
+   * v77e — opcional: pré-computado para perf quando o caller invoca a fn
+   * em loop (ex.: /estatisticas itera ~N times × 8 fases). Se não passado,
+   * é calculado internamente (comportamento dos callers existentes não muda).
+   */
+  precomputedReal?: Record<QualificationPhase, Set<number>>,
+): TeamPhaseStatus {
+  // 1) Já alcançou? (usa REAL com gate v72 + h2h v75 — fonte única).
+  const real = precomputedReal ?? extractAdvancingTeams(matches, undefined, {
+    gateGroupStage: true, teams,
+  });
+  if (real[phase].has(teamId)) return 'reached';
+
+  // 2) v77c — Exclusões mútuas decididas pela final / pela semi:
+  //    - Quem ganhou a final NÃO é vice; quem perdeu a final NÃO é campeão.
+  //    - Quem é finalista (venceu a SF) NÃO disputa o 3º lugar.
+  if (phase === 'runner_up' && real.champion.has(teamId)) return 'eliminated';
+  if (phase === 'champion'  && real.runner_up.has(teamId)) return 'eliminated';
+  if (phase === 'third_place' && real.semis.has(teamId)) return 'eliminated';
+
+  // 3) Fase de grupos (helper isolado — também é PRÉ-REQUISITO de KO).
+  const groupStatus = evaluateGroupStageStatusInternal(teamId, matches, teams);
+  if (phase === 'group_stage') return groupStatus;
+
+  // 4) v77e — Propagação de eliminação de grupos para KO:
+  //    Se o time foi eliminado na fase de grupos (4º com grupo fechado, ou 3º
+  //    fora dos melhores com 1ª fase fechada), ele NÃO pode mais alcançar
+  //    NENHUMA fase KO. Sem essa propagação, `evaluateKOPhaseStatus` itera
+  //    apenas `teamMatches` decididos e pula group_stage_* por design —
+  //    retornaria `pending` indevidamente para r32/r16/.../champion.
+  if (groupStatus === 'eliminated') return 'eliminated';
+
+  // 5) Fases KO: walk-forward defensivo (gateado por pré-requisito da v77d)
+  //    + derrotas reais decididas em matches do time.
+  return evaluateKOPhaseStatus(teamId, phase, matches);
+}
+
+/**
+ * v77e — Helper interno: status de uma seleção em group_stage, isolado
+ * para ser reaproveitado pela propagação de eliminação para KO.
+ *
+ * NOTA: este helper recomputa standings/getCompletedGroups internamente.
+ * Para o caso de grupos abertos, retorna 'pending' (não cravamos nada).
+ * Para grupos fechados, devolve 'reached' (1º/2º via fast path) /
+ * 'eliminated' (4º, ou 3º fora dos melhores após 1ª fase fechar) /
+ * 'pending' (3º aguardando 1ª fase fechar).
+ *
+ * IMPORTANTE: 1º/2º com grupo fechado já estão em `real.group_stage`
+ * (gate v72), então o fast path do caller os captura como 'reached'.
+ * Se chegarmos aqui para 1º/2º, é defesa — retornamos 'pending'.
+ */
+function evaluateGroupStageStatusInternal(
+  teamId: number,
+  matches: Match[],
+  teams: Team[],
+): TeamPhaseStatus {
+  const team = teams.find(t => t.id === teamId);
+  if (!team) return 'pending';
+  const completed = getCompletedGroups(matches);
+  if (!completed.has(team.group_code)) return 'pending';
+  const standings = computeGroupStandings(teams, matches, {
+    tieBreakerMode: 'head_to_head',
+  });
+  const std = standings.get(team.group_code);
+  const idx = std?.findIndex(s => s.team_id === teamId) ?? -1;
+  if (idx === 3) return 'eliminated';  // 4º
+  if (idx === 0 || idx === 1) return 'reached';  // 1º/2º — defesa (fast path captura)
+  if (idx === 2) {                     // 3º
+    if (!isGroupStageFullyComplete(matches)) return 'pending';
+    // 1ª fase fechou: top-8 melhores 3ºs entram em real.group_stage (fast path);
+    // se caímos aqui é porque NÃO está em top-8 → eliminated.
+    return 'eliminated';
+  }
+  return 'pending';  // defesa
+}
+
+function evaluateKOPhaseStatus(
+  teamId: number,
+  phase: QualificationPhase,
+  matches: Match[],
+): TeamPhaseStatus {
+  // Ordem oficial dos matches KO (do mais cedo para o mais tarde).
+  const koOrder: Match['phase'][] = [
+    'round_of_32', 'round_of_16', 'quarter_finals', 'semi_finals',
+    'third_place', 'final',
+  ];
+  const koPhaseIndex = (mp: Match['phase']) => koOrder.indexOf(mp);
+
+  // Match real que "decide" a aposta de cada fase (vencer = alcançar a fase;
+  // exceção: 'runner_up' = perder a final).
+  const decidingMatchFor: Partial<Record<QualificationPhase, Match['phase']>> = {
+    r32: 'round_of_32',
+    r16: 'round_of_16',
+    quarters: 'quarter_finals',
+    semis: 'semi_finals',
+    third_place: 'third_place',
+    runner_up: 'final',
+    champion: 'final',
+  };
+
+  const decidingPhase = decidingMatchFor[phase];
+  if (!decidingPhase) return 'pending';  // defesa — group_stage não chega aqui
+  const decidingIdx = koPhaseIndex(decidingPhase);
+
+  // v77d — Fase PRÉ-REQUISITO que precisa estar TOTALMENTE decidida antes
+  // de podermos usar o bracket real como evidência conclusiva de eliminação.
+  //
+  //   Por que esse cuidado? `populateKnockoutMatches` (bracket.ts) popula
+  //   R32 provisoriamente assim que cada grupo tem ≥2 jogos jogados
+  //   (`areAllGroupsMature` / `MIN_GAMES_PER_GROUP_FOR_BRACKET = 2`).
+  //   Se o grupo de um 3º colocado ainda não fechou, o bracket provisório
+  //   pode NÃO incluí-lo em R32 — mas ele ainda pode subir para a lista
+  //   dos 8 melhores 3ºs quando a 1ª fase inteira fechar. Cravar
+  //   `eliminated` baseado nesse bracket é PRECIPITADO.
+  //
+  //   Regra: só confiamos no bracket de `decidingPhase` quando a fase
+  //   ANTERIOR (fonte dos times que entram nela) está totalmente fechada:
+  //     - r32 → group_stage totalmente fechado (12×6 jogos)
+  //     - r16 → r32 totalmente decidido
+  //     - quarters → r16 totalmente decidido
+  //     - semis → quarters totalmente decidido
+  //     - third_place / runner_up / champion → semis totalmente decidido
+  const prereqPhase: Partial<Record<QualificationPhase, QualificationPhase>> = {
+    r32: 'group_stage',
+    r16: 'r32',
+    quarters: 'r16',
+    semis: 'quarters',
+    third_place: 'semis',
+    runner_up: 'semis',
+    champion: 'semis',
+  };
+  const prereq = prereqPhase[phase];
+
+  // v77c+v77d — Walk-forward defensivo (gateado pela fase pré-requisito):
+  // Só dispara quando a fase ANTERIOR está totalmente decidida (= o
+  // bracket da fase atual é definitivo, não provisório).
+  if (prereq && isPhaseCompleted(prereq, matches)) {
+    const decidingMatches = matches.filter(m => m.phase === decidingPhase);
+    if (decidingMatches.length > 0) {
+      const allPopulated = decidingMatches.every(m =>
+        m.home_team_id != null && m.away_team_id != null
+      );
+      if (allPopulated) {
+        const isParticipant = decidingMatches.some(m =>
+          m.home_team_id === teamId || m.away_team_id === teamId
+        );
+        if (!isParticipant) return 'eliminated';
+      }
+    }
+  }
+
+  // Detecção tradicional: derrota explícita do team em fase ≤ decidingIdx.
+  const teamMatches = matches.filter(m =>
+    (m.home_team_id === teamId || m.away_team_id === teamId) &&
+    m.home_score != null && m.away_score != null
+  );
+
+  for (const m of teamMatches) {
+    const mp = m.phase;
+    // Group stages não eliminam KO (são considerados pelo gate de groups).
+    if (mp === 'group_stage_1' || mp === 'group_stage_2' || mp === 'group_stage_3') continue;
+    const w = determineMatchWinnerId(m);
+    if (w == null) continue;                    // empate sem pens — não decide
+    if (w === teamId) continue;                  // venceu — não elimina
+    const mpIdx = koPhaseIndex(mp);
+    if (mpIdx < 0) continue;                     // fase desconhecida — defesa
+    // Time PERDEU este match KO. Avaliar se elimina a aposta:
+
+    if (phase === 'champion') {
+      // Qualquer derrota em KO elimina campeão.
+      return 'eliminated';
+    }
+    if (phase === 'runner_up') {
+      // Perder A FINAL → reached (já tratado no fast path). Aqui é defesa:
+      // se caímos com mp === 'final' é porque o fast path não marcou; não
+      // queremos pintar como eliminated indevidamente — pulamos.
+      if (mp === 'final') continue;
+      return 'eliminated';
+    }
+    if (phase === 'third_place') {
+      // Perder SF é OK (assim o time chega ao jogo de 3º).
+      if (mp === 'semi_finals') continue;
+      // Perder A FINAL não impede o 3º (n/a — quem chega à final não joga 3º,
+      // mas a derrota na final em si não é o que elimina o caminho do 3º).
+      if (mp === 'final') continue;
+      // Qualquer outra derrota elimina (R32/R16/QF/3º place).
+      return 'eliminated';
+    }
+    // r32 / r16 / quarters / semis: derrota numa fase ≤ a apostada elimina.
+    if (mpIdx <= decidingIdx) return 'eliminated';
+  }
+
+  return 'pending';
+}
+
 function allKoDecided(matches: Match[], phase: Match['phase']): boolean {
   const list = matches.filter(m => m.phase === phase);
   if (list.length === 0) return false;

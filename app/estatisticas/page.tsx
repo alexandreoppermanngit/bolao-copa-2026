@@ -12,6 +12,8 @@ import type {
 import {
   buildPredictionCensus, extractAdvancingTeams,
   phasePointsBase, qualificationZebraFactor,
+  // v77e — status visual por seleção/fase (✅/⏳/❌).
+  evaluateTeamPhaseStatus, type TeamPhaseStatus,
 } from '@/lib/bolao/qualification';
 import { DEFAULT_SETTINGS } from '@/lib/bolao/scoring';
 import { getGlobalLockStatus } from '@/lib/bolao/lockStatus';
@@ -117,21 +119,46 @@ export default async function EstatisticasPage() {
   const census = buildPredictionCensus(allUserBets, matches, teams, annexC);
   // `extractAdvancingTeams` agora também popula `real.runner_up` (perdedor
   // da final real, se já houver resultado) — migration 006.
-  const real = extractAdvancingTeams(matches);
+  //
+  // v77d — Passa `gateGroupStage: true` + `teams` para aplicar o gate v72
+  // também aqui: 1º/2º só "Avançou? ✅" depois que os 6 jogos do grupo
+  // estão completos; melhores 3ºs só depois que TODOS os 12 grupos
+  // fecharem. Sem o gate, `real.group_stage` era derivada do bracket
+  // provisoriamente populado (R32 com slots antecipados via
+  // `populateKnockoutMatches` quando os grupos têm ≥2 jogos), e
+  // /estatisticas mostrava times "classificados oficialmente" antes
+  // da hora. Mesma fonte de verdade que /meus-resultados e o recalc.
+  const real = extractAdvancingTeams(matches, undefined, {
+    gateGroupStage: true,
+    teams,
+  });
 
-  // Para cada fase, listar todos os teamIds que tiveram ≥1 voto.
-  type Row = { team: Team; bettors: number; pct: number; reallyAdvanced: boolean; factor: number; possiblePts: number };
+  // v77e — Para cada (team, phase) calculamos o status tri-estado real:
+  //   reached    → ✅ classificada (gate v72 + h2h v75 já aplicados)
+  //   pending    → ⏳ ainda não dá pra cravar
+  //   eliminated → ❌ matematicamente fora (4º de grupo fechado, 3º fora
+  //                  dos top-8 após 1ª fase fechar, perdeu KO etc.)
+  // Passamos `real` pré-computado para evitar N² calls de
+  // extractAdvancingTeams dentro de evaluateTeamPhaseStatus.
+  type Row = {
+    team: Team;
+    bettors: number;
+    pct: number;
+    status: TeamPhaseStatus;
+    factor: number;
+    possiblePts: number;
+  };
   function rowsForPhase(phase: QualificationPhase): Row[] {
     const teamsWithVotes: Row[] = [];
     for (const t of teams) {
       const bettors = census.counts.get(`${phase}:${t.id}`) ?? 0;
       if (bettors === 0) continue;
       const pct = census.totalUsers > 0 ? bettors / census.totalUsers : 0;
-      const reallyAdvanced = real[phase].has(t.id);
+      const status = evaluateTeamPhaseStatus(t.id, phase, matches, teams, real);
       const factor = qualificationZebraFactor(census.totalUsers, bettors);
       const basePts = phasePointsBase(phase, settings);
       const possiblePts = Number((basePts * (1 + factor)).toFixed(2));
-      teamsWithVotes.push({ team: t, bettors, pct, reallyAdvanced, factor, possiblePts });
+      teamsWithVotes.push({ team: t, bettors, pct, status, factor, possiblePts });
     }
     return teamsWithVotes.sort((a, b) => b.bettors - a.bettors);
   }
@@ -170,20 +197,41 @@ export default async function EstatisticasPage() {
                 <table className="spreadsheet-table text-xs w-full">
                   <thead>
                     <tr>
-                      <th>Seleção</th><th>Apostadores</th><th>%</th><th>Avançou?</th><th>Fator</th><th>Pts possíveis</th>
+                      <th>Seleção</th><th>Apostadores</th><th>%</th>
+                      {/* v77e — Status tri-estado: ✅ classificada, ⏳ pendente, ❌ eliminada */}
+                      <th>Status</th>
+                      <th>Fator</th><th>Pts possíveis</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {rows.map(r => (
-                      <tr key={r.team.id} className={r.reallyAdvanced ? 'bg-green-50' : ''}>
-                        <td><TeamNameWithFlag team={r.team} size="sm" /></td>
-                        <td className="text-center">{r.bettors}</td>
-                        <td className="text-center">{(r.pct * 100).toFixed(0)}%</td>
-                        <td className="text-center">{r.reallyAdvanced ? '✅' : '—'}</td>
-                        <td className="text-center">{(1 + r.factor).toFixed(2)}×</td>
-                        <td className="text-right font-bold">{r.possiblePts}</td>
-                      </tr>
-                    ))}
+                    {rows.map(r => {
+                      // v77e — cores por status, alinhadas com /meus-resultados:
+                      //   reached    → verde claro
+                      //   eliminated → vermelho discreto
+                      //   pending    → sem destaque
+                      const rowCls =
+                        r.status === 'reached' ? 'bg-green-50'
+                        : r.status === 'eliminated' ? 'bg-red-50/60'
+                        : '';
+                      const icon =
+                        r.status === 'reached' ? '✅'
+                        : r.status === 'eliminated' ? '❌'
+                        : '⏳';
+                      const title =
+                        r.status === 'reached' ? 'Classificada (gate v72 já permite)'
+                        : r.status === 'eliminated' ? 'Eliminada — não vai pontuar'
+                        : 'Aguardando definição';
+                      return (
+                        <tr key={r.team.id} className={rowCls}>
+                          <td><TeamNameWithFlag team={r.team} size="sm" /></td>
+                          <td className="text-center">{r.bettors}</td>
+                          <td className="text-center">{(r.pct * 100).toFixed(0)}%</td>
+                          <td className="text-center" title={title}>{icon}</td>
+                          <td className="text-center">{(1 + r.factor).toFixed(2)}×</td>
+                          <td className="text-right font-bold">{r.possiblePts}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
