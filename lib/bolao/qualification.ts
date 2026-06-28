@@ -206,7 +206,11 @@ export function evaluateTeamPhaseStatus(
   if (phase === 'third_place' && real.semis.has(teamId)) return 'eliminated';
 
   // 3) Fase de grupos (helper isolado — também é PRÉ-REQUISITO de KO).
-  const groupStatus = evaluateGroupStageStatusInternal(teamId, matches, teams);
+  // v77f — Passa `real` para o helper conseguir reconhecer top-8 melhores
+  // 3ºs como 'reached' (eles entram em `real.group_stage` pelo gate v72,
+  // mas o fast path do caller só checa `real[phase]` da fase QUERIDA,
+  // então pra phase !== 'group_stage' o helper precisa do `real` direto).
+  const groupStatus = evaluateGroupStageStatusInternal(teamId, matches, teams, real);
   if (phase === 'group_stage') return groupStatus;
 
   // 4) v77e — Propagação de eliminação de grupos para KO:
@@ -223,24 +227,37 @@ export function evaluateTeamPhaseStatus(
 }
 
 /**
- * v77e — Helper interno: status de uma seleção em group_stage, isolado
- * para ser reaproveitado pela propagação de eliminação para KO.
+ * v77e + v77f — Helper interno: status de uma seleção em group_stage,
+ * isolado para ser reaproveitado pela propagação de eliminação para KO.
  *
- * NOTA: este helper recomputa standings/getCompletedGroups internamente.
- * Para o caso de grupos abertos, retorna 'pending' (não cravamos nada).
- * Para grupos fechados, devolve 'reached' (1º/2º via fast path) /
- * 'eliminated' (4º, ou 3º fora dos melhores após 1ª fase fechar) /
- * 'pending' (3º aguardando 1ª fase fechar).
+ * v77f — CRÍTICO: precisa receber `real` para conseguir reconhecer top-8
+ * melhores 3ºs como 'reached'. Sem isso, o helper devolvia 'eliminated'
+ * para QUALQUER 3º colocado com 1ª fase fechada (inclusive os top-8),
+ * porque o "fast path captura top-8" mencionado na v77e só funcionava
+ * quando o caller queria phase==='group_stage'. Pra qualquer outra fase
+ * (r16/quartas/.../champion), o fast path em `evaluateTeamPhaseStatus`
+ * checa `real[phase]` (não `real.group_stage`), e o helper era invocado
+ * SEMPRE — não só para 3ºs fora dos top-8.
  *
- * IMPORTANTE: 1º/2º com grupo fechado já estão em `real.group_stage`
- * (gate v72), então o fast path do caller os captura como 'reached'.
- * Se chegarmos aqui para 1º/2º, é defesa — retornamos 'pending'.
+ * Regras:
+ *   - real.group_stage.has(team)             → 'reached' (1º/2º fechado OU 3º top-8)
+ *   - team não no time/grupos abertos        → 'pending'
+ *   - 4º colocado de grupo fechado           → 'eliminated'
+ *   - 3º com 1ª fase aberta                  → 'pending'
+ *   - 3º com 1ª fase fechada e NÃO no real   → 'eliminated' (3º fora dos top-8)
  */
 function evaluateGroupStageStatusInternal(
   teamId: number,
   matches: Match[],
   teams: Team[],
+  real: Record<QualificationPhase, Set<number>>,
 ): TeamPhaseStatus {
+  // v77f — Fast path local: se o time está em real.group_stage, ele JÁ
+  // avançou para o KO (1º/2º com grupo fechado, ou 3º top-8 com 1ª fase
+  // fechada — ambos respeitam o gate v72). Esse é o caminho que estava
+  // faltando e causava marcação falsa de 'eliminated' para top-8 thirds.
+  if (real.group_stage.has(teamId)) return 'reached';
+
   const team = teams.find(t => t.id === teamId);
   if (!team) return 'pending';
   const completed = getCompletedGroups(matches);
@@ -250,15 +267,16 @@ function evaluateGroupStageStatusInternal(
   });
   const std = standings.get(team.group_code);
   const idx = std?.findIndex(s => s.team_id === teamId) ?? -1;
-  if (idx === 3) return 'eliminated';  // 4º
-  if (idx === 0 || idx === 1) return 'reached';  // 1º/2º — defesa (fast path captura)
+  if (idx === 3) return 'eliminated';  // 4º — sempre eliminado se grupo fechou
   if (idx === 2) {                     // 3º
     if (!isGroupStageFullyComplete(matches)) return 'pending';
-    // 1ª fase fechou: top-8 melhores 3ºs entram em real.group_stage (fast path);
-    // se caímos aqui é porque NÃO está em top-8 → eliminated.
+    // 1ª fase fechou + não está em real.group_stage (não passou no fast path
+    // acima) → confirmado fora dos top-8 → eliminated.
     return 'eliminated';
   }
-  return 'pending';  // defesa
+  // 1º/2º que NÃO estão em real.group_stage seria estranho (gate v72 inclui
+  // ambos quando o grupo está fechado). Defensivo: 'pending'.
+  return 'pending';
 }
 
 function evaluateKOPhaseStatus(
