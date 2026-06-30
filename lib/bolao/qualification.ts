@@ -634,7 +634,33 @@ export function extractUserPrediction(
     const key = sortedKeyOfQualifyingThirds(thirds);
     const opt = key.length === 8 ? findAnnexCOption(key, annexCOptions) : null;
     const resolved = simulateBracket(simMatches, teams, standings, thirds, opt, hints);
-    byPhase = extractAdvancingTeams(resolved, hints);
+
+    // v79_hotfix — CRÍTICO: re-aplicar snapshots POR CIMA do resolved.
+    //
+    // `simulateBracket` chama `populateKnockoutMatches`, que resolve
+    // placeholders (`1A`, `2B`, `winner_Mxx`) consultando standings /
+    // Anexo C / hints. Esse caminho IGNORA `simMatches[M].home_team_id`
+    // quando o match tem placeholder — substitui pelo time resolvido,
+    // que pode ser DIFERENTE do snapshot da bet (ex.: o palpite do
+    // usuário punha Holanda como `home`, mas as standings resolvem o
+    // mesmo slot como Marrocos `home`). Daí `determineMatchWinnerId`
+    // com `knockout_advancer: 'home'` retornava Marrocos — usuário via
+    // o "campeão apostado" como Marrocos no UQS mesmo tendo apostado
+    // Holanda nos pênaltis.
+    //
+    // Fix: snapshots da bet são a FONTE DE VERDADE do confronto previsto
+    // pelo usuário. Aplicamos por cima do resolved para que o
+    // `extractAdvancingTeams` abaixo veja a orientação certa.
+    const resolvedWithSnapshots: Match[] = resolved.map(m => {
+      const b = userBetsByMatch.get(m.id);
+      if (!b) return m;
+      if (b.bet_home_team_id == null && b.bet_away_team_id == null) return m;
+      const next: Match = { ...m };
+      if (b.bet_home_team_id != null) next.home_team_id = b.bet_home_team_id;
+      if (b.bet_away_team_id != null) next.away_team_id = b.bet_away_team_id;
+      return next;
+    });
+    byPhase = extractAdvancingTeams(resolvedWithSnapshots, hints);
   }
 
   // v69 — Sobrescrita por SNAPSHOT da bet para 3 fases derivadas de UM

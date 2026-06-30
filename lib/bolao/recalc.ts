@@ -75,20 +75,27 @@ export async function recalcMatchAndAllBets(matchId: number) {
     return { updated: betsList.length };
   }
 
-  // KO: precisa do recálculo cross-fase + bets desse jogo
-  const updates = betsList.map(b => {
-    const pts = calculateBasePoints(
-      { home_score: b.home_score, away_score: b.away_score },
-      { home_score: match.home_score!, away_score: match.away_score! }, cfg,
-    );
-    return sb.from('bets').update({ points: pts, points_with_zebra: pts }).eq('id', b.id);
-  });
-  await Promise.all(updates);
+  // v79_hotfix — KO: NÃO pontuar direto pelos scores do match!
+  // No mata-mata, ponto só sai quando o CONFRONTO apostado (bet snapshot)
+  // bate com o confronto real. A versão antiga deste loop chamava
+  // `calculateBasePoints(b.scores, match.scores)` sem validar o matchup,
+  // dando 10 pts para 1-1 vs 1-1 mesmo quando o usuário apostou
+  // Suécia-Marrocos e o jogo real foi Holanda-Marrocos.
+  //
+  // Fix: zerar as bets deste match aqui e DELEGAR a pontuação para
+  // `recalcKnockoutMatchupsForAllUsers`, que sabe percorrer todos os
+  // KO matches reais comparando contra o snapshot (`bet_home_team_id` /
+  // `bet_away_team_id`). Só lá o ponto certo é gravado.
+  const zeros = betsList.map(b =>
+    sb.from('bets').update({ points: 0, points_with_zebra: 0 }).eq('id', b.id),
+  );
+  await Promise.all(zeros);
   await sb.from('matches').update({
     result_code: outcomeOf(match.home_score!, match.away_score!),
   }).eq('id', matchId);
 
-  // Cross-fase: o NOVO resultado pode pontuar/despontuar palpites de outros usuários em outros jogos
+  // Cross-fase: re-pontua TODAS as bets KO de todos os usuários com base
+  // em snapshot vs matches reais (incluindo este match recém-atualizado).
   await recalcKnockoutMatchupsForAllUsers(sb, cfg);
 
   return { updated: betsList.length };
@@ -145,18 +152,43 @@ async function recalcKnockoutMatchupsForAllUsers(sb: SB, cfg: Settings) {
 
     const updates = userBets
       .filter(b => {
-        const m = userResolvedWithOverrides.find(x => x.id === b.match_id);
-        return m && !isGroupPhase(m.phase);
+        // Filtra pelo phase REAL do match (não simulado), pra não perder bets
+        // de match KO que ficaram sem teams resolvidos na simulação.
+        const real = allMatches.find(x => x.id === b.match_id);
+        return real && !isGroupPhase(real.phase);
       })
       .map(b => {
-        const m = userResolvedWithOverrides.find(x => x.id === b.match_id)!;
-        if (m.home_team_id == null || m.away_team_id == null) {
+        // v79_hotfix — FONTE DE VERDADE para o confronto apostado é o
+        // SNAPSHOT da bet (`bet_home_team_id` / `bet_away_team_id`).
+        // O snapshot é imune a re-resolução de placeholder no
+        // `populateKnockoutMatches` (que pode produzir teams diferentes
+        // do que o usuário apostou). Antes deste fix, esta função usava
+        // `userResolvedWithOverrides[match].home_team_id/away_team_id`
+        // (teams da simulação), o que invisibilizava o mismatch e dava
+        // pontos quando não devia.
+        //
+        // Fallback (bets legadas pré-v65 sem snapshot): cai na simulação
+        // do usuário — comportamento antigo, "best effort" para dados antigos.
+        let pairHome = b.bet_home_team_id;
+        let pairAway = b.bet_away_team_id;
+        if (pairHome == null || pairAway == null) {
+          const simM = userResolvedWithOverrides.find(x => x.id === b.match_id);
+          pairHome = simM?.home_team_id ?? null;
+          pairAway = simM?.away_team_id ?? null;
+        }
+        if (pairHome == null || pairAway == null) {
           return sb.from('bets').update({ points: 0, points_with_zebra: 0 }).eq('id', b.id);
         }
-        const hit = findRealKnockoutMatchup(m.home_team_id, m.away_team_id, allMatches);
+        // Procura este matchup APOSTADO em qualquer match KO REAL com placar.
+        // Se nenhum match real teve esse confronto → 0 pts (confronto errado).
+        const hit = findRealKnockoutMatchup(pairHome, pairAway, allMatches);
         if (!hit) {
           return sb.from('bets').update({ points: 0, points_with_zebra: 0 }).eq('id', b.id);
         }
+        // `hit.inverted` é calculado contra o `pairHome` que passamos. Como
+        // passamos o snapshot, a inversão é relativa à orientação do snapshot
+        // (= orientação do palpite do usuário), garantindo que `b.home_score`
+        // / `b.away_score` sejam comparados corretamente com o placar real.
         const adjusted = hit.inverted
           ? { home_score: b.away_score, away_score: b.home_score }
           : { home_score: b.home_score, away_score: b.away_score };
