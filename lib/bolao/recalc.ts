@@ -22,6 +22,8 @@ import { findRealKnockoutMatchup } from './matchup';
 import {
   extractAdvancingTeams, buildPredictionCensus,
   calculateUserQualificationScores,
+  // v80_hotfix — helper que zera pens reais ao aplicar bet snapshot.
+  applyBetSnapshotToMatch,
 } from './qualification';
 import { fetchAll } from '@/lib/supabase/fetchAll';
 import type {
@@ -132,9 +134,14 @@ async function recalcKnockoutMatchupsForAllUsers(sb: SB, cfg: Settings) {
     if (!userBets || userBets.length === 0) continue;
 
     const userBetsByMatch = new Map(userBets.map(b => [b.match_id, b]));
+    // v80_hotfix — usar `applyBetSnapshotToMatch` para também zerar pens
+    // reais (palpite não tem pens; tiebreaker é `knockout_advancer`).
+    // Sem isso, `populateKnockoutMatches` resolvia placeholders
+    // `winner_Mxx` com o vencedor real dos pênaltis em vez de respeitar
+    // o `knockout_advancer` do usuário.
     const simMatches: Match[] = allMatches.map(m => {
       const b = userBetsByMatch.get(m.id);
-      if (b) return { ...m, home_score: b.home_score, away_score: b.away_score };
+      if (b) return applyBetSnapshotToMatch(m, b);
       return m;
     });
     if (!areAllGroupsMature(simMatches)) continue;

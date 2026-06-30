@@ -587,6 +587,46 @@ export interface UserPrediction {
  * = bet da final; third_place = bet da disputa de 3º). Snapshot da bet
  * é a fonte de verdade dessas 3 fases — não a simulação.
  */
+/**
+ * v80_hotfix — Helper para aplicar o palpite sobre um match, produzindo
+ * a "match virtual do palpite" usada em simulações de árvore do usuário.
+ *
+ * Aplica:
+ *   - scores do palpite (bet.home_score, bet.away_score)
+ *   - team_ids do snapshot quando disponíveis
+ *     (bet.bet_home_team_id, bet.bet_away_team_id)
+ *   - ZERA home_pens/away_pens — palpite NÃO tem pens; o tiebreaker
+ *     do palpite é `knockout_advancer`, aplicado depois via `hints`.
+ *
+ * Por que zerar pens:
+ *   `determineMatchWinnerId(m, hint)` em bracket.ts:39-53 checa
+ *   m.home_pens/m.away_pens ANTES do hint `knockout_advancer`. As pens
+ *   REAIS (do jogo oficial) NÃO devem influenciar a árvore do PALPITE
+ *   — o usuário marcou `knockout_advancer = 'home'` indicando que o
+ *   time apostado como home (snapshot) avança. Sem zerar as pens reais
+ *   ao construir simMatches, o vencedor REAL dos pênaltis prevalecia,
+ *   gerando user_qualification_scores com a seleção REAL em vez da
+ *   APOSTADA (bug: Holanda apostada como home nos pênaltis virava
+ *   Marrocos no UQS).
+ *
+ * Exportado porque é usado em `recalc.ts` (recalcKnockoutMatchupsForAllUsers)
+ * e `audit.ts` (simulateBracketForUser) também — os 3 caminhos que
+ * constroem "match virtual do palpite".
+ */
+export function applyBetSnapshotToMatch(m: Match, b: Bet): Match {
+  const next: Match = {
+    ...m,
+    home_score: b.home_score,
+    away_score: b.away_score,
+    // Pens reais NÃO se aplicam ao palpite — tiebreaker é knockout_advancer.
+    home_pens: null,
+    away_pens: null,
+  };
+  if (b.bet_home_team_id != null) next.home_team_id = b.bet_home_team_id;
+  if (b.bet_away_team_id != null) next.away_team_id = b.bet_away_team_id;
+  return next;
+}
+
 export function extractUserPrediction(
   userBets: Bet[],
   allMatches: Match[],
@@ -600,17 +640,16 @@ export function extractUserPrediction(
   // os `home_team_id`/`away_team_id` ficam definidos antes da simulação
   // — então `extractAdvancingTeams` vê o time apostado correto mesmo se
   // o bracket oficial estava zerado.
+  //
+  // v80_hotfix — usar helper `applyBetSnapshotToMatch`, que TAMBÉM zera
+  // `home_pens`/`away_pens` (palpite não tem pens — `knockout_advancer`
+  // é o tiebreaker). Sem zerar, `determineMatchWinnerId` consultava as
+  // pens reais (linha 47-49 do bracket.ts) ANTES do hint do usuário,
+  // gerando UQS com a seleção REAL classificada em vez da APOSTADA.
   const simMatches: Match[] = allMatches.map(m => {
     const b = userBetsByMatch.get(m.id);
     if (!b) return m;
-    const next: Match = {
-      ...m,
-      home_score: b.home_score,
-      away_score: b.away_score,
-    };
-    if (b.bet_home_team_id != null) next.home_team_id = b.bet_home_team_id;
-    if (b.bet_away_team_id != null) next.away_team_id = b.bet_away_team_id;
-    return next;
+    return applyBetSnapshotToMatch(m, b);
   });
 
   const hints = new Map<number, KoTiebreakHint>();
@@ -635,7 +674,7 @@ export function extractUserPrediction(
     const opt = key.length === 8 ? findAnnexCOption(key, annexCOptions) : null;
     const resolved = simulateBracket(simMatches, teams, standings, thirds, opt, hints);
 
-    // v79_hotfix — CRÍTICO: re-aplicar snapshots POR CIMA do resolved.
+    // v79_hotfix + v80_hotfix — CRÍTICO: re-aplicar snapshots POR CIMA do resolved.
     //
     // `simulateBracket` chama `populateKnockoutMatches`, que resolve
     // placeholders (`1A`, `2B`, `winner_Mxx`) consultando standings /
@@ -643,22 +682,15 @@ export function extractUserPrediction(
     // quando o match tem placeholder — substitui pelo time resolvido,
     // que pode ser DIFERENTE do snapshot da bet (ex.: o palpite do
     // usuário punha Holanda como `home`, mas as standings resolvem o
-    // mesmo slot como Marrocos `home`). Daí `determineMatchWinnerId`
-    // com `knockout_advancer: 'home'` retornava Marrocos — usuário via
-    // o "campeão apostado" como Marrocos no UQS mesmo tendo apostado
-    // Holanda nos pênaltis.
+    // mesmo slot como Marrocos `home`).
     //
-    // Fix: snapshots da bet são a FONTE DE VERDADE do confronto previsto
-    // pelo usuário. Aplicamos por cima do resolved para que o
-    // `extractAdvancingTeams` abaixo veja a orientação certa.
+    // Aqui usamos `applyBetSnapshotToMatch`, que também garante pens=null
+    // (defensivamente — `resolved` já herdou pens=null de simMatches, mas
+    // esse helper protege caso a fonte mude no futuro).
     const resolvedWithSnapshots: Match[] = resolved.map(m => {
       const b = userBetsByMatch.get(m.id);
       if (!b) return m;
-      if (b.bet_home_team_id == null && b.bet_away_team_id == null) return m;
-      const next: Match = { ...m };
-      if (b.bet_home_team_id != null) next.home_team_id = b.bet_home_team_id;
-      if (b.bet_away_team_id != null) next.away_team_id = b.bet_away_team_id;
-      return next;
+      return applyBetSnapshotToMatch(m, b);
     });
     byPhase = extractAdvancingTeams(resolvedWithSnapshots, hints);
   }

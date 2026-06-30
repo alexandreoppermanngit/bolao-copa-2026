@@ -23,6 +23,8 @@ import {
 } from './standings';
 import { findAnnexCOption, simulateBracket, type KoTiebreakHint } from './bracket';
 import { findRealKnockoutMatchup } from './matchup';
+// v80_hotfix — helper que zera pens reais ao aplicar bet snapshot.
+import { applyBetSnapshotToMatch } from './qualification';
 
 export type AuditReason =
   | 'group_stage_direct'         // Fase de grupos: pontuação direta do jogo
@@ -187,9 +189,12 @@ export function simulateBracketForUser(params: {
 }): Match[] {
   const { userBets, allMatches, teams, annexCOptions } = params;
   const byMatch = new Map(userBets.map(b => [b.match_id, b]));
+  // v80_hotfix — usar `applyBetSnapshotToMatch` para também zerar pens
+  // reais. Sem isso, o vencedor real dos pênaltis sobrescrevia o
+  // `knockout_advancer` do palpite ao resolver `winner_Mxx` placeholders.
   const simMatches: Match[] = allMatches.map(m => {
     const b = byMatch.get(m.id);
-    if (b) return { ...m, home_score: b.home_score, away_score: b.away_score };
+    if (b) return applyBetSnapshotToMatch(m, b);
     return m;
   });
   if (!areAllGroupsMature(simMatches)) return simMatches;
