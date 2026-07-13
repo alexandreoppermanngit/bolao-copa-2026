@@ -330,16 +330,97 @@ export async function recalcAllQualificationScores() {
   return { ok: true, users: profiles.length, rows: allRows.length };
 }
 
+/**
+ * v80b — Recalcula pontuação de UM match de fase de grupos in-place.
+ * Extraído do branch group de `recalcMatchAndAllBets` para uso em batch
+ * dentro de `fullRecalc` sem o overhead de carregar settings a cada match.
+ */
+async function recalcGroupMatchInline(sb: SB, match: Match, cfg: Settings): Promise<void> {
+  if (match.home_score == null || match.away_score == null) {
+    await sb.from('bets').update({ points: 0, points_with_zebra: 0 }).eq('match_id', match.id);
+    return;
+  }
+  const { data: bets } = await sb.from('bets').select('*').eq('match_id', match.id);
+  const betsList: Bet[] = (bets ?? []) as Bet[];
+  const resultOutcome = outcomeOf(match.home_score, match.away_score);
+  const counts = { home: 0, draw: 0, away: 0 };
+  for (const b of betsList) counts[outcomeOf(b.home_score, b.away_score)]++;
+  const total = betsList.length;
+  const pctSame = total > 0 ? counts[resultOutcome] / total : 0;
+  const mult = zebraMultiplier(pctSame, cfg);
+  await Promise.all(betsList.map(b => {
+    const pts = calculateBasePoints(
+      { home_score: b.home_score, away_score: b.away_score },
+      { home_score: match.home_score!, away_score: match.away_score! }, cfg,
+    );
+    const ptsZebra = pts === 0 ? 0 : Number((pts * mult).toFixed(2));
+    return sb.from('bets').update({ points: pts, points_with_zebra: ptsZebra }).eq('id', b.id);
+  }));
+  await sb.from('matches').update({ result_code: resultOutcome }).eq('id', match.id);
+}
+
+/**
+ * v80b — `fullRecalc` refatorado para caber no timeout de 60s da Vercel.
+ *
+ * ANTES (v80 e anteriores): iterava TODOS os matches com placar chamando
+ * `recalcMatchAndAllBets(m.id)`. Para cada match KO, isso disparava
+ * `recalcKnockoutMatchupsForAllUsers` INTERNAMENTE — passagem pesada que
+ * pagina profiles/bets/matches/teams/annexC/overrides e simula bracket
+ * por usuário. Com N matches KO com placar, essa passagem rodava N vezes,
+ * estourando o `maxDuration = 60` (erro FUNCTION_INVOCATION_TIMEOUT).
+ *
+ * AGORA: cross-phase recalc roda UMA vez no fim. Grupos ainda são
+ * per-match (baratos, precisam do zebra por match).
+ *
+ * Passos:
+ *   1. Carrega settings + matches uma vez.
+ *   2. Recalcula grupos in-place (Promise.all das bets por match).
+ *   3. Zera TODAS as bets de matches KO em lote.
+ *   4. Grava `result_code` para KO com placar (batch).
+ *   5. Chama `recalcKnockoutMatchupsForAllUsers` UMA vez (v79/v80 usa snapshot).
+ *   6. `recalcBracket` (bracket oficial).
+ *   7. `recalcAllQualificationScores` (v80 respeita advancer via snapshot).
+ */
 export async function fullRecalc() {
   const sb = createServiceRoleClient();
-  const { data: matches } = await sb.from('matches').select('id, home_score, away_score, phase');
-  for (const m of (matches ?? []) as { id: number; home_score: number | null; away_score: number | null; phase: Match['phase'] }[]) {
-    if (m.home_score != null && m.away_score != null) {
-      await recalcMatchAndAllBets(m.id);
-    }
+  const [{ data: settingsRaw }, { data: matchesRaw }] = await Promise.all([
+    sb.from('settings').select('*').eq('id', 1).single(),
+    sb.from('matches').select('*').order('id'),
+  ]);
+  const cfg: Settings = (settingsRaw ?? DEFAULT_SETTINGS) as Settings;
+  const matches: Match[] = (matchesRaw ?? []) as Match[];
+  const withScore = matches.filter(m => m.home_score != null && m.away_score != null);
+
+  // 1) Grupos: pontuação direta com zebra por match (paralelizado nas bets).
+  const groupMatches = withScore.filter(m => isGroupPhase(m.phase));
+  for (const m of groupMatches) {
+    await recalcGroupMatchInline(sb, m, cfg);
   }
+
+  // 2) KO: zerar TODAS as bets em lote; result_code em batch.
+  const koMatches = matches.filter(m => !isGroupPhase(m.phase));
+  const koMatchIds = koMatches.map(m => m.id);
+  if (koMatchIds.length > 0) {
+    await sb.from('bets').update({ points: 0, points_with_zebra: 0 }).in('match_id', koMatchIds);
+  }
+  const koWithScore = withScore.filter(m => !isGroupPhase(m.phase));
+  if (koWithScore.length > 0) {
+    await Promise.all(koWithScore.map(m =>
+      sb.from('matches').update({
+        result_code: outcomeOf(m.home_score!, m.away_score!),
+      }).eq('id', m.id),
+    ));
+  }
+
+  // 3) Cross-phase KO recalc UMA vez (v79 usa snapshot, v80 zera pens reais).
+  await recalcKnockoutMatchupsForAllUsers(sb, cfg);
+
+  // 4) Bracket oficial.
   await recalcBracket();
+
+  // 5) UQS (v80 respeita `knockout_advancer` via `applyBetSnapshotToMatch`).
   await recalcAllQualificationScores();
+
   return { ok: true };
 }
 

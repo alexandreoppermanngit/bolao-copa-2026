@@ -14,7 +14,11 @@ import { revalidatePath } from 'next/cache';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
-export const maxDuration = 60;
+// v80b — 300s (Pro plan). No Hobby fica limitado a 60s de qualquer forma;
+// o valor não quebra o build. O refactor de `fullRecalc` já reduz o tempo
+// para caber em 60s no caso comum — este limite é rede de segurança para
+// picos.
+export const maxDuration = 300;
 
 function jsonError(message: string, status = 500, extra?: Record<string, unknown>) {
   return NextResponse.json(
